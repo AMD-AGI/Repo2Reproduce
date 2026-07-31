@@ -332,20 +332,34 @@ async def docker_build(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "docker_run",
-    "Run a bash command inside a built image with AMD GPU devices attached. Returns exit "
-    "code + output tail. Use for smoke tests and the reproduction command. EXECUTE MODE ONLY.",
+    "Run a bash command inside a built image with AMD GPU devices attached. Runs "
+    "SYNCHRONOUSLY in the foreground; full output streams to a log file and the result "
+    "returns a tail + log_file path + timeout_used. Pass `timeout` (seconds) sized to the "
+    "FULL job for a real reproduction (defaults to R2R_DOCKER_RUN_TIMEOUT / 6h). Use for "
+    "smoke tests and the reproduction command. EXECUTE MODE ONLY.",
     {
         "type": "object",
         "properties": {
             "tag": {"type": "string"},
             "command": {"type": "string"},
             "workdir": {"type": "string"},
+            "timeout": {
+                "type": "integer",
+                "description": "Max seconds before the container is killed. Size this to "
+                "the FULL protocol (e.g. 14400 for a multi-hour train+eval). Omit to use "
+                "R2R_DOCKER_RUN_TIMEOUT or the 6h default.",
+            },
         },
         "required": ["tag", "command"],
     },
 )
 async def docker_run(args: dict[str, Any]) -> dict[str, Any]:
-    res = amd_tools.docker_run(args["tag"], args["command"], workdir=args.get("workdir"))
+    res = amd_tools.docker_run(
+        args["tag"],
+        args["command"],
+        workdir=args.get("workdir"),
+        timeout=args.get("timeout"),
+    )
     return _ok(json.dumps(res, indent=2))
 
 
