@@ -11,18 +11,25 @@ This is the #1 execution trap.
 
 Instead, run the training-and-evaluation SYNCHRONOUSLY in a SINGLE docker_run call, in the
 foreground, and pass a large `timeout` (seconds) sized to the job. The call blocks until
-training finishes and returns the full stdout containing the final metric. Reduce the
-workload first (fewer epochs/samples/runs) so it fits comfortably in one call, and say so.
+training finishes and returns the full stdout containing the final metric.
+
+Do NOT reduce epochs, samples, seeds, comparison arms, or evaluation scope unless the
+orchestrator explicitly says the user approved that reduction. If the full paper protocol
+cannot run, return `executed: false` and explain why; do not turn a smaller proxy into a
+paper-level match.
 
 Steps:
 1. First do quick setup/data steps via docker_run as needed. Set ROCm env
    (FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE, FLASH_ATTENTION_TRITON_AMD_AUTOTUNE=0,
-   PYTORCH_TUNABLEOP_ENABLED=1).
-2. Run train+eval as ONE foreground docker_run with a generous timeout (e.g. 1800-3600s).
-   If the full protocol is too long for one call, run a reduced-but-representative version
-   (fewer epochs/samples/runs) IN THE FOREGROUND and state the reduction explicitly. Prefer
-   the metric the paper reports.
-3. Extract the achieved metric from that call's returned output.
+   PYTORCH_TUNABLEOP_ENABLED=0). TunableOp is OFF by default because variable-length
+   inference can re-tune every shape and become dramatically slower.
+2. Before a long run, execute a small 20-50 sample/batch pilot only to measure throughput,
+   host/GPU memory growth, and ETA. A pilot is a health check, not the reported result.
+   Investigate an implausible ETA or growing host RSS before continuing.
+3. Run the FULL train+eval protocol as ONE foreground docker_run with a timeout sized to
+   the measured pilot ETA. If it cannot fit, report `executed: false` unless a scope
+   reduction was explicitly approved.
+4. Extract the achieved metric from that call's returned output.
 
 Return ONLY JSON (Output 5 shape):
 {

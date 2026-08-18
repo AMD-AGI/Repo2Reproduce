@@ -31,6 +31,18 @@ def _emit_result(result: RunResult, run_dir: Path) -> None:
     console.rule("[bold]Result")
     if result.cost_usd is not None:
         console.print(f"[dim]Estimated cost: ${result.cost_usd:.4f}[/dim]")
+    status_color = {
+        "completed": "green",
+        "completed_with_failure": "yellow",
+        "incomplete": "red",
+        "cancelled": "yellow",
+    }.get(result.run_status, "yellow")
+    console.print(
+        f"[{status_color}]Run status: {result.run_status}[/{status_color}] "
+        f"[dim](report source: {result.report_source})[/dim]"
+    )
+    for reason in result.status_reasons:
+        console.print(f"[dim]- {reason}[/dim]")
 
     if result.report is None:
         console.print("[red]No structured report produced.[/red]")
@@ -46,7 +58,13 @@ def _emit_result(result: RunResult, run_dir: Path) -> None:
     (run_dir / "report.md").write_text(md, "utf-8")
     console.print(f"[green]Report written to:[/green] {run_dir / 'report.md'}")
     console.print(f"[green]JSON written to  :[/green] {run_dir / 'report.json'}\n")
+    if (run_dir / "preflight.md").exists():
+        console.print(f"[green]Pre-run review   :[/green] {run_dir / 'preflight.md'}")
+    if (run_dir / "final_review.md").exists():
+        console.print(f"[green]Final review     :[/green] {run_dir / 'final_review.md'}\n")
     console.print(md)
+    if result.is_error or result.run_status in {"incomplete", "cancelled"}:
+        raise typer.Exit(code=1)
 
 
 @app.command("reproduce")
@@ -67,6 +85,15 @@ def reproduce_cmd(
     execute: bool = typer.Option(
         False, "--execute", help="With --amd: actually build the image and run the "
         "reproduction on the GPU (default: plan + Dockerfile only)."
+    ),
+    allow_scope_reduction: bool = typer.Option(
+        False,
+        "--allow-scope-reduction",
+        help=(
+            "Explicitly allow the executor to reduce samples/epochs/seeds if the full "
+            "paper protocol cannot run. Reduced results must still be reported as "
+            "non-comparable to the paper."
+        ),
     ),
 ):
     """Read the paper + code, choose an experiment, extract config, synthesize commands."""
@@ -94,7 +121,8 @@ def reproduce_cmd(
 
     result = asyncio.run(
         reproduce(paper_url, repo_url, run_dir, target=target, on_text=_on_text,
-                  stream=stream, amd=amd, execute=execute)
+                  stream=stream, amd=amd, execute=execute,
+                  allow_scope_reduction=allow_scope_reduction)
     )
     _emit_result(result, run_dir)
 
