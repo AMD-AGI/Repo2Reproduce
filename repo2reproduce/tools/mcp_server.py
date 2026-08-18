@@ -342,7 +342,10 @@ async def docker_build(args: dict[str, Any]) -> dict[str, Any]:
             "workdir": {"type": "string"},
             "timeout": {
                 "type": "integer",
-                "description": "Foreground command timeout in seconds (default 3600).",
+                "description": (
+                    "Foreground command timeout in seconds. Omit to use "
+                    "R2R_DOCKER_RUN_TIMEOUT or the 6-hour default."
+                ),
             },
         },
         "required": ["tag", "command"],
@@ -353,7 +356,7 @@ async def docker_run(args: dict[str, Any]) -> dict[str, Any]:
         args["tag"],
         args["command"],
         workdir=args.get("workdir"),
-        timeout=int(args.get("timeout") or 3600),
+        timeout=args.get("timeout"),
     )
     return _ok(json.dumps(res, indent=2))
 

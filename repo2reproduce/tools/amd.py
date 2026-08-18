@@ -20,8 +20,26 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Optional
+
+_DEFAULT_DOCKER_RUN_TIMEOUT = 21600
+_DEFAULT_DOCKER_BUILD_TIMEOUT = 7200
+
+
+def _resolve_timeout(explicit: Optional[int], env_var: str, default: int) -> int:
+    """Timeout precedence: explicit argument, environment, built-in default."""
+    if explicit is not None:
+        return int(explicit)
+    value = os.environ.get(env_var)
+    if value:
+        try:
+            return int(value)
+        except ValueError:
+            pass
+    return default
+
 
 # GPU device flags for `docker run` on an AMD/ROCm host.
 ROCM_DOCKER_DEVICE_ARGS = [
@@ -116,21 +134,45 @@ def docker_available() -> bool:
     return shutil.which("docker") is not None
 
 
-def docker_build(context_dir: Path, tag: str, timeout: int = 5400) -> dict[str, Any]:
+def docker_build(
+    context_dir: Path,
+    tag: str,
+    timeout: Optional[int] = None,
+) -> dict[str, Any]:
     """Build an image. Returns exit code + tail of the build log (for error feedback)."""
     if not docker_available():
         return {"ok": False, "error": "docker not found on host"}
-    proc = subprocess.run(
-        ["docker", "build", "-t", tag, "."],
-        cwd=str(context_dir),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
+    resolved = _resolve_timeout(
+        timeout,
+        "R2R_DOCKER_BUILD_TIMEOUT",
+        _DEFAULT_DOCKER_BUILD_TIMEOUT,
     )
+    try:
+        proc = subprocess.run(
+            ["docker", "build", "-t", tag, "."],
+            cwd=str(context_dir),
+            capture_output=True,
+            text=True,
+            timeout=resolved,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "exit_code": 124,
+            "timed_out": True,
+            "timeout_used": resolved,
+            "log_tail": (
+                f"docker build exceeded {resolved}s. Raise "
+                "R2R_DOCKER_BUILD_TIMEOUT for a legitimately longer build."
+            ),
+            "tag": tag,
+        }
     log = (proc.stdout + "\n" + proc.stderr)
     return {
         "ok": proc.returncode == 0,
         "exit_code": proc.returncode,
+        "timed_out": False,
+        "timeout_used": resolved,
         "log_tail": log[-4000:],
         "tag": tag,
     }
@@ -140,7 +182,7 @@ def docker_run(
     tag: str,
     command: str,
     gpus: bool = True,
-    timeout: int = 3600,
+    timeout: Optional[int] = None,
     env: Optional[dict[str, str]] = None,
     workdir: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -152,6 +194,11 @@ def docker_run(
     """
     if not docker_available():
         return {"ok": False, "error": "docker not found on host"}
+    resolved = _resolve_timeout(
+        timeout,
+        "R2R_DOCKER_RUN_TIMEOUT",
+        _DEFAULT_DOCKER_RUN_TIMEOUT,
+    )
     args = ["docker", "run", "--rm"]
     if gpus:
         args += ROCM_DOCKER_DEVICE_ARGS
@@ -164,30 +211,61 @@ def docker_run(
     for k, v in merged_env.items():
         args += ["-e", f"{k}={v}"]
     args += [tag, "bash", "-lc", command]
-    try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-        output = (stdout + "\n" + stderr)[-8000:]
-        return {
-            "ok": False,
-            "timed_out": True,
-            "timeout_seconds": timeout,
-            "exit_code": 124,
-            "output": output,
-            "error": (
-                f"docker_run timed out after {timeout}s; partial output is preserved. "
-                "Increase the timeout after measuring a pilot ETA rather than reducing scope."
-            ),
-        }
-    out = (proc.stdout + "\n" + proc.stderr)
+    run_dir = Path(os.environ.get("R2R_RUN_DIR", "runs/_default"))
+    log_dir = run_dir / "amd_run" / "docker_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"docker_run_{time.strftime('%Y%m%d-%H%M%S')}.log"
+
+    timed_out = False
+    with log_path.open("w", encoding="utf-8") as log_file:
+        try:
+            proc = subprocess.run(
+                args,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                timeout=resolved,
+            )
+            return_code = proc.returncode
+        except subprocess.TimeoutExpired as exc:
+            return_code = 124
+            timed_out = True
+            stdout = (
+                exc.stdout.decode()
+                if isinstance(exc.stdout, bytes)
+                else (exc.stdout or "")
+            )
+            stderr = (
+                exc.stderr.decode()
+                if isinstance(exc.stderr, bytes)
+                else (exc.stderr or "")
+            )
+            if stdout or stderr:
+                log_file.write(stdout + "\n" + stderr + "\n")
+            log_file.write(
+                f"\n[r2r] docker_run timed out after {resolved}s. Increase the "
+                "timeout after measuring a pilot ETA rather than reducing scope.\n"
+            )
+
+    output = log_path.read_text(encoding="utf-8", errors="replace")
     return {
-        "ok": proc.returncode == 0,
-        "timed_out": False,
-        "timeout_seconds": timeout,
-        "exit_code": proc.returncode,
-        "output": out[-8000:],
+        "ok": return_code == 0 and not timed_out,
+        "timed_out": timed_out,
+        "timeout_seconds": resolved,
+        "timeout_used": resolved,
+        "exit_code": return_code,
+        "log_file": str(log_path),
+        "output": output[-8000:],
+        **(
+            {
+                "error": (
+                    f"docker_run timed out after {resolved}s; full partial output "
+                    f"is preserved at {log_path}. Increase the timeout after "
+                    "measuring a pilot ETA rather than reducing scope."
+                )
+            }
+            if timed_out
+            else {}
+        ),
     }
 
 
