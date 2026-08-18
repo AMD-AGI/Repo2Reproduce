@@ -15,6 +15,10 @@ def render_markdown(report: dict[str, Any]) -> str:
     out.append(f"# Reproduction Plan: {report.get('paper_title') or 'Untitled'}\n")
     out.append(f"- **Paper:** {report.get('paper_url', '')}")
     out.append(f"- **Code:** {report.get('repo_url', '')}")
+    if report.get("run_status"):
+        out.append(f"- **Run status:** {report.get('run_status')}")
+        for reason in report.get("run_status_reasons") or []:
+            out.append(f"  - {reason}")
     out.append(f"- **Confidence:** {report.get('confidence', 'unknown')}")
     if report.get("confidence_rationale"):
         out.append(f"  - {report['confidence_rationale']}")

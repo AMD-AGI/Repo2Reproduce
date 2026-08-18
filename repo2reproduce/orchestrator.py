@@ -23,6 +23,8 @@ from . import config, memory as mem
 from .agents import build_agents
 from .hooks import build_hooks
 from .provider import ensure_runtime_path, provider_env, reasoning_model
+from .result_quality import choose_best_report, classify_run
+from .reviewers import run_final_review, run_preflight_review
 from .schemas import final_report_json_schema
 from .tools.mcp_server import (
     AMD_EXEC_TOOL_NAMES,
@@ -41,6 +43,10 @@ class RunResult:
     raw_result_text: Optional[str]
     cost_usd: Optional[float]
     is_error: bool
+    report_source: str = "none"
+    run_status: str = "incomplete"
+    status_reasons: tuple[str, ...] = ()
+    execute_requested: bool = False
 
 
 def _orchestrator_prompt(amd: bool = False) -> str:
@@ -167,17 +173,42 @@ async def _run_session(
                 if getattr(message, "structured_output", None):
                     report = message.structured_output
 
-    # Prefer the persisted report.json (the save_report tool writes it).
+    # Compare the final structured output with the report persisted by
+    # save_report. A schema-valid stub must not overwrite a more complete
+    # report that was already saved (issue #8).
     saved = run_dir / "report.json"
-    if report is None and saved.exists():
+    saved_report: Optional[dict[str, Any]] = None
+    if saved.exists():
         try:
-            report = json.loads(saved.read_text(encoding="utf-8"))
+            saved_report = json.loads(saved.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             pass
-    if report is None and raw_text:
-        report = _try_parse_json(raw_text)
+    raw_report = _try_parse_json(raw_text) if raw_text else None
+    if report is None:
+        report = raw_report
+    report, report_source = choose_best_report(report, saved_report)
+    run_status, reasons = classify_run(
+        report,
+        is_error=is_error,
+        execute_requested=execute,
+    )
+    if report is not None:
+        report = dict(report)
+        report["run_status"] = run_status
+        report["run_status_reasons"] = reasons
+        report["report_source"] = report_source
 
-    return RunResult(run_dir, report, raw_text, cost, is_error)
+    return RunResult(
+        run_dir,
+        report,
+        raw_text,
+        cost,
+        is_error,
+        report_source=report_source,
+        run_status=run_status,
+        status_reasons=tuple(reasons),
+        execute_requested=execute,
+    )
 
 
 async def reproduce(
@@ -189,6 +220,7 @@ async def reproduce(
     stream: bool = False,
     amd: bool = False,
     execute: bool = False,
+    allow_scope_reduction: bool = False,
 ) -> RunResult:
     """Run the full pipeline. ``on_text`` is an optional callback(str) for streaming.
 
@@ -201,6 +233,13 @@ async def reproduce(
     if project_claude.exists():
         (run_dir / "CLAUDE.md").write_text(project_claude.read_text(encoding="utf-8"), "utf-8")
 
+    preflight = await run_preflight_review(
+        paper_url,
+        repo_url,
+        run_dir,
+        target=target,
+    )
+
     if amd:
         task = (
             f"Make this repo run on AMD ROCm GPUs and reproduce one paper result on it.\n"
@@ -209,6 +248,12 @@ async def reproduce(
             f"TARGET_EXPERIMENT: {target or '(choose the single most reproducible one)'}\n"
             f"EXECUTE_MODE: {execute} (if false, produce the AMD env plan + Dockerfile but "
             f"do not build/run).\n"
+            f"SCOPE_REDUCTION_APPROVED: {allow_scope_reduction}. If false, do not reduce "
+            f"samples, epochs, seeds, comparison arms, or evaluation scope; report that the "
+            f"full protocol could not run instead.\n"
+            f"PRE-FLIGHT REVIEW: read {run_dir / 'preflight.md'} before selecting the "
+            f"experiment. Address its blockers and required comparisons; do not silently "
+            f"replace an unreproducible claim with an unrelated proxy.\n"
             f"Run Track 1 and Track 2 in parallel, then converge. End with the final JSON."
         )
     else:
@@ -217,11 +262,18 @@ async def reproduce(
             f"PAPER_URL: {paper_url}\n"
             f"REPO_URL: {repo_url}\n"
             f"TARGET_EXPERIMENT: {target or '(choose the single most reproducible one)'}\n"
+            f"SCOPE_REDUCTION_APPROVED: {allow_scope_reduction}. If false, do not reduce "
+            f"samples, epochs, seeds, comparison arms, or evaluation scope.\n"
+            f"PRE-FLIGHT REVIEW: read {run_dir / 'preflight.md'} before selecting the "
+            f"experiment. Address its blockers and required comparisons; do not silently "
+            f"replace an unreproducible claim with an unrelated proxy.\n"
             f"Follow the orchestrator pipeline and end with the final JSON report."
         )
-    return await _run_session(
+    result = await _run_session(
         task, run_dir, stream=stream, amd=amd, execute=execute, on_text=on_text
     )
+    await run_final_review(run_dir, result.report, result.raw_result_text)
+    return result
 
 
 async def resume_run(

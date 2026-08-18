@@ -35,8 +35,11 @@ _NUM = r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?"
 # The "mean ± std" head of a metric string; we only need the mean.
 _MEAN_RE = re.compile(rf"({_NUM})\s*(%?)\s*(?:±|\+/-|\+-)")
 # An explicit primary metric like "Acc: 0.827" / "MSE = 0.0074" / "PSNR: 39.68".
-_LABELLED_RE = re.compile(rf"(?:Acc|Accuracy|MSE|PSNR|SSIM|Recall|ADE|DSC|Dice|Score|"
-                          rf"delta|δ)\s*[:=]?\s*({_NUM})", re.IGNORECASE)
+_LABELLED_RE = re.compile(
+    rf"(?:Acc|Accuracy|MSE|PSNR|SSIM|Recall|ADE|DSC|Dice|Score|PPL|Perplexity|"
+    rf"delta|δ)\s*[:=]?\s*({_NUM})",
+    re.IGNORECASE,
+)
 # A trailing "[raw: ... <num> ...]" often carries the un-scaled fraction we prefer.
 _RAW_RE = re.compile(rf"raw:[^0-9\-+]*({_NUM})", re.IGNORECASE)
 _ANY_NUM_RE = re.compile(_NUM)
@@ -254,6 +257,11 @@ def evaluate_runs(
                     note="report.json unreadable",
                 )
             )
+            continue
+        # Incomplete/cancelled workflows are not reproduction outcomes. Keep
+        # their failure reports on disk, but exclude them from Exec Rate and
+        # Performance Gap aggregation (issue #5).
+        if report.get("run_status") in {"incomplete", "cancelled"}:
             continue
         summary.runs.append(
             metric_from_report(report, name, reference_override=references.get(name))

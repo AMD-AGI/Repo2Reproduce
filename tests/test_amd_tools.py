@@ -106,6 +106,28 @@ def test_validate_dockerfile_accepts_good_base():
     assert res["content"] == good
 
 
+def test_docker_run_timeout_returns_diagnostics(monkeypatch):
+    monkeypatch.setattr(amd_tools, "docker_available", lambda: True)
+
+    def timeout(*_args, **_kwargs):
+        raise amd_tools.subprocess.TimeoutExpired(
+            cmd=["docker", "run"],
+            timeout=42,
+            output="pilot output",
+            stderr="still running",
+        )
+
+    monkeypatch.setattr(amd_tools.subprocess, "run", timeout)
+    res = amd_tools.docker_run("image", "python train.py", timeout=42)
+
+    assert res["ok"] is False
+    assert res["timed_out"] is True
+    assert res["timeout_seconds"] == 42
+    assert res["exit_code"] == 124
+    assert "pilot output" in res["output"]
+    assert "Increase the timeout" in res["error"]
+
+
 def test_seed_amd_memory(tmp_path, monkeypatch):
     monkeypatch.setenv("R2R_MEMORY_PATH", str(tmp_path / "mem.jsonl"))
     res = amd_knowledge.seed_amd_memory()

@@ -164,9 +164,31 @@ def docker_run(
     for k, v in merged_env.items():
         args += ["-e", f"{k}={v}"]
     args += [tag, "bash", "-lc", command]
-    proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        output = (stdout + "\n" + stderr)[-8000:]
+        return {
+            "ok": False,
+            "timed_out": True,
+            "timeout_seconds": timeout,
+            "exit_code": 124,
+            "output": output,
+            "error": (
+                f"docker_run timed out after {timeout}s; partial output is preserved. "
+                "Increase the timeout after measuring a pilot ETA rather than reducing scope."
+            ),
+        }
     out = (proc.stdout + "\n" + proc.stderr)
-    return {"ok": proc.returncode == 0, "exit_code": proc.returncode, "output": out[-8000:]}
+    return {
+        "ok": proc.returncode == 0,
+        "timed_out": False,
+        "timeout_seconds": timeout,
+        "exit_code": proc.returncode,
+        "output": out[-8000:],
+    }
 
 
 def probe_torch(image_or_base: str) -> dict[str, Any]:

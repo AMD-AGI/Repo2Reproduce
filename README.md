@@ -27,6 +27,16 @@ quote (with a page locator) or a real file path/flag in the code.
 
 A Claude Agent SDK orchestrator coordinates specialized subagents.
 
+Two independent Markdown reviewers surround the main pipeline:
+
+- **Pre-run verifier** — reads the paper and repo first, then writes `preflight.md`
+  covering local reproducibility, data/setup identity, required comparisons, and blockers.
+- **Final verifier** — reads `preflight.md`, the execution logs, and the final report, then
+  writes `final_review.md` covering unsupported numbers, silent scope changes, and whether
+  the conclusion is fair.
+
+These reviews are advisory and intentionally do not use a strict JSON schema.
+
 **Track 1 (always):**
 
 | Phase | Subagent | Output |
@@ -164,6 +174,9 @@ r2r reproduce <paper_url> <repo_url> --amd
 
 # Full: build the image AND run the reproduction on an AMD GPU (needs Docker + ROCm host):
 r2r reproduce <paper_url> <repo_url> --amd --execute
+
+# Scope reduction is forbidden by default. Opt in only with explicit human approval:
+r2r reproduce <paper_url> <repo_url> --amd --execute --allow-scope-reduction
 ```
 
 `--execute` implies `--amd`. In execute mode the tool runs containers with AMD GPU
@@ -182,7 +195,13 @@ Artifacts land in `runs/<timestamp>-<repo>/`:
 
 - `report.md` / `report.json` — selected experiment, configuration, grounded commands,
   and (with `--amd`) the ROCm Dockerfile + achieved metric.
+- `preflight.md` — independent paper/repo feasibility review written before orchestration.
+- `final_review.md` — independent review of the execution evidence and final conclusion.
 - the parsed paper and the cloned repo.
+
+Execute-mode reports also include `run_status`. Incomplete/cancelled runs exit non-zero
+and are excluded from aggregate execution metrics. If the final SDK structured output is
+less complete than an earlier `save_report` artifact, the saved report is preserved.
 
 ## Notes
 

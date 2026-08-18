@@ -340,12 +340,21 @@ async def docker_build(args: dict[str, Any]) -> dict[str, Any]:
             "tag": {"type": "string"},
             "command": {"type": "string"},
             "workdir": {"type": "string"},
+            "timeout": {
+                "type": "integer",
+                "description": "Foreground command timeout in seconds (default 3600).",
+            },
         },
         "required": ["tag", "command"],
     },
 )
 async def docker_run(args: dict[str, Any]) -> dict[str, Any]:
-    res = amd_tools.docker_run(args["tag"], args["command"], workdir=args.get("workdir"))
+    res = amd_tools.docker_run(
+        args["tag"],
+        args["command"],
+        workdir=args.get("workdir"),
+        timeout=int(args.get("timeout") or 3600),
+    )
     return _ok(json.dumps(res, indent=2))
 
 

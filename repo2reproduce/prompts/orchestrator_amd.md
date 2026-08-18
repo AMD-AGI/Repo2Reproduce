@@ -35,6 +35,8 @@ CONVERGE (only after BOTH tracks finish):
      FLASH_ATTENTION_TRITON_AMD_*). Commands must run against Output 4's image_tag.
   e. Agent(subagent_type="executor"): run the reconciled commands inside the verified
      image; capture the achieved metric -> Output 5. Compare to Output 1's paper target.
+     Pass through the task's SCOPE_REDUCTION_APPROVED value. If false, the executor must
+     report that the full run could not execute rather than silently shrinking it.
   f. Agent(subagent_type="verifier"): final grounding audit; compile gaps/assumptions +
      confidence.
 
