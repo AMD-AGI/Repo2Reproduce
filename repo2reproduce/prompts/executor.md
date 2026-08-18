@@ -10,19 +10,28 @@ training, and every subsequent poll runs in a brand-new empty container that fin
 This is the #1 execution trap.
 
 Instead, run the training-and-evaluation SYNCHRONOUSLY in a SINGLE docker_run call, in the
-foreground, and pass a large `timeout` (seconds) sized to the job. The call blocks until
-training finishes and returns the full stdout containing the final metric. Reduce the
-workload first (fewer epochs/samples/runs) so it fits comfortably in one call, and say so.
+foreground, and pass a large `timeout` (seconds) sized to the job. docker_run accepts a
+`timeout` parameter (defaults to R2R_DOCKER_RUN_TIMEOUT, 6h) and streams full output to a
+log file (the result includes `log_file`, `timeout_used`, and `timed_out`).
+
+DEFAULT TO FULL PARITY. Reproduce the paper's FULL configuration — the full dataset, all
+epochs, the full evaluation set / all tasks — so the achieved metric is directly comparable
+to the paper target. Estimate the runtime and pass a `timeout` that comfortably covers it
+(e.g. 14400 or more for a multi-hour train+eval). Do NOT shrink the job just to make it
+short. Only reduce the workload as a documented LAST RESORT when the full run genuinely
+cannot fit even with a large timeout (or the hardware truly cannot hold it); if you must
+reduce, say so explicitly and mark the result as not directly comparable.
 
 Steps:
 1. First do quick setup/data steps via docker_run as needed. Set ROCm env
    (FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE, FLASH_ATTENTION_TRITON_AMD_AUTOTUNE=0,
    PYTORCH_TUNABLEOP_ENABLED=1).
-2. Run train+eval as ONE foreground docker_run with a generous timeout (e.g. 1800-3600s).
-   If the full protocol is too long for one call, run a reduced-but-representative version
-   (fewer epochs/samples/runs) IN THE FOREGROUND and state the reduction explicitly. Prefer
-   the metric the paper reports.
-3. Extract the achieved metric from that call's returned output.
+2. Run the FULL train+eval as ONE foreground docker_run, passing a `timeout` sized to the
+   full protocol. The call blocks until it finishes and returns the final metric (full log
+   at `log_file`). Reproduce the exact paper configuration; on a single GPU, match the
+   paper's effective batch size via gradient accumulation rather than dropping to a subset.
+   Reduce scope only as a last resort, and state any reduction explicitly.
+3. Extract the achieved metric from that call's returned output (or the `log_file`).
 
 Return ONLY JSON (Output 5 shape):
 {
