@@ -47,14 +47,11 @@ def _make_bash_guard(execute: bool):
         patterns = list(_ALWAYS_BLOCK) + ([] if execute else list(_PLAN_ONLY_BLOCK))
         for pat in patterns:
             if re.search(pat, command):
-                reason = (
-                    f"Blocked by Repo2Reproduce safety policy (pattern: {pat}). "
-                    + (
-                        "Destructive/host-mutating commands are never allowed."
-                        if pat in _ALWAYS_BLOCK
-                        else "This is plan-only mode; run experiments inside the container "
-                        "via docker_run, or re-run with --execute."
-                    )
+                reason = f"Blocked by Repo2Reproduce safety policy (pattern: {pat}). " + (
+                    "Destructive/host-mutating commands are never allowed."
+                    if pat in _ALWAYS_BLOCK
+                    else "This is plan-only mode; run experiments inside the container "
+                    "via docker_run, or re-run with --execute."
                 )
                 return {
                     "hookSpecificOutput": {
@@ -79,12 +76,14 @@ def _make_logger(label: str):
     return _log
 
 
-def build_hooks(execute: bool = False) -> dict:
-    """Assemble the hook configuration.
+def build_hooks(execute: bool = False, amd: bool = False) -> dict:
+    """Assemble safety and observability hooks only.
 
-    ``execute`` relaxes the plan-only blocks (training/downloads) so the executor can run
-    the reproduction inside the container; destructive host ops stay blocked.
+    Pipeline order/completion is owned by Python in ``orchestrator.py``; hooks are no
+    longer used as an orchestration mechanism. ``amd`` remains in the signature for API
+    compatibility with callers.
     """
+    del amd
     return {
         "PreToolUse": [
             HookMatcher(matcher="Bash", hooks=[_make_bash_guard(execute)], timeout=30),

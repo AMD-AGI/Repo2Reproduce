@@ -6,6 +6,7 @@ tools know where the per-run artifacts live.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -46,9 +47,14 @@ def _err(text: str) -> dict[str, Any]:
 )
 async def ingest_paper(args: dict[str, Any]) -> dict[str, Any]:
     run = _run_dir()
-    try:
+
+    def _ingest():
         pdf = paper_io.download_pdf(args["url"], run / "paper" / "paper.pdf")
-        parsed = paper_io.parse_paper(pdf, run / "paper")
+        return paper_io.parse_paper(pdf, run / "paper")
+
+    try:
+        # Offloaded to a thread: download + the Java OpenDataLoader parse are blocking.
+        parsed = await asyncio.to_thread(_ingest)
     except Exception as e:  # keep the loop alive
         return _err(f"Paper ingestion failed: {e}")
     return _ok(
@@ -93,7 +99,8 @@ async def verify_quote_in_paper(args: dict[str, Any]) -> dict[str, Any]:
 async def clone_repo(args: dict[str, Any]) -> dict[str, Any]:
     dest = _run_dir() / "repo"
     try:
-        meta = code_intel.clone_repo(args["repo_url"], dest)
+        # Offloaded to a thread: git clone is a blocking subprocess.
+        meta = await asyncio.to_thread(code_intel.clone_repo, args["repo_url"], dest)
     except Exception as e:
         return _err(f"Clone failed: {e}")
     return _ok(json.dumps(meta, indent=2), structuredContent=meta)
@@ -223,8 +230,12 @@ async def recall_memory(args: dict[str, Any]) -> dict[str, Any]:
     )
     if not hits:
         return _ok("(no learnings stored yet)")
-    return _ok(json.dumps([{"text": h["text"], "tags": h.get("tags", []),
-                            "scope": h.get("scope")} for h in hits], indent=2))
+    return _ok(
+        json.dumps(
+            [{"text": h["text"], "tags": h.get("tags", []), "scope": h.get("scope")} for h in hits],
+            indent=2,
+        )
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -277,7 +288,9 @@ async def detect_cuda_kernels(args: dict[str, Any]) -> dict[str, Any]:
     {"image": str},
 )
 async def capture_torch_baseline(args: dict[str, Any]) -> dict[str, Any]:
-    res = amd_tools.probe_torch(args["image"])
+    # Offloaded to a thread: probe_torch shells out to `docker run` (blocking). Running it
+    # inline would freeze the single host event loop, starving hooks/other MCP tools.
+    res = await asyncio.to_thread(amd_tools.probe_torch, args["image"])
     if not res.get("ok"):
         return _err(f"torch probe failed: {res.get('error')}")
     return _ok(json.dumps(res, indent=2))
@@ -326,7 +339,9 @@ async def docker_build(args: dict[str, Any]) -> dict[str, Any]:
     ctx = _run_dir() / "amd_run"
     if not (ctx / "Dockerfile").exists():
         return _err("No Dockerfile in amd_run/. Call write_dockerfile first.")
-    res = amd_tools.docker_build(ctx, args["tag"])
+    # Offloaded to a thread: docker_build blocks (up to 2h). Keeping it off the event loop
+    # lets the host keep servicing hooks and other tool calls during the build.
+    res = await asyncio.to_thread(amd_tools.docker_build, ctx, args["tag"])
     return _ok(json.dumps(res, indent=2)) if res.get("ok") else _err(json.dumps(res, indent=2))
 
 
@@ -354,7 +369,12 @@ async def docker_build(args: dict[str, Any]) -> dict[str, Any]:
     },
 )
 async def docker_run(args: dict[str, Any]) -> dict[str, Any]:
-    res = amd_tools.docker_run(
+    # CRITICAL: offload to a thread. docker_run blocks on subprocess.run for the ENTIRE
+    # container lifetime (up to 6h). Running it inline froze the single host event loop, so
+    # the SDK could not service the finalize save_report call or its hook — the "host client
+    # unreachable" failure in FlatQuant exec-4. to_thread keeps the loop responsive.
+    res = await asyncio.to_thread(
+        amd_tools.docker_run,
         args["tag"],
         args["command"],
         workdir=args.get("workdir"),
@@ -385,8 +405,11 @@ async def verify_rocm_integrity(args: dict[str, Any]) -> dict[str, Any]:
             baseline = json.loads(args["baseline_json"])
         except json.JSONDecodeError:
             baseline = None
-    res = amd_tools.verify_rocm_integrity(args["image"], baseline=baseline)
-    return _ok(json.dumps(res, indent=2)) if res.get("verified") else _err(json.dumps(res, indent=2))
+    # Offloaded to a thread: verify_rocm_integrity shells out to `docker run` (blocking).
+    res = await asyncio.to_thread(amd_tools.verify_rocm_integrity, args["image"], baseline=baseline)
+    return (
+        _ok(json.dumps(res, indent=2)) if res.get("verified") else _err(json.dumps(res, indent=2))
+    )
 
 
 def build_server():
