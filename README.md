@@ -25,7 +25,9 @@ quote (with a page locator) or a real file path/flag in the code.
 
 ## How it works
 
-A Claude Agent SDK orchestrator coordinates specialized subagents.
+A deterministic Python phase runner controls ordering, dependencies, parallel groups,
+optional skips, persistence, and completion. Each phase is still performed by a focused
+Claude Agent SDK worker with its own prompt and tools.
 
 **Track 1 (always):**
 
@@ -181,7 +183,11 @@ HIP_VISIBLE_DEVICES=0 r2r reproduce <paper_url> <repo_url> --amd --execute
 Artifacts land in `runs/<timestamp>-<repo>/`:
 
 - `report.md` / `report.json` — selected experiment, configuration, grounded commands,
-  and (with `--amd`) the ROCm Dockerfile + achieved metric.
+  and (with `--amd`) the ROCm Dockerfile + achieved metric. These are written only when
+  the mode-specific report is complete.
+- `pipeline_state.json` and `phases/*.json` — durable status/output for every phase.
+  Failed runs keep these files plus `draft_report.json`, so `r2r resume` can reuse
+  successful phases and retry only failed or unfinished work.
 - the parsed paper and the cloned repo.
 
 ## Notes

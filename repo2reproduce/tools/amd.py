@@ -186,7 +186,10 @@ def docker_run(
 
     Forwards the host's GPU-pinning env (``HIP_VISIBLE_DEVICES`` /
     ``ROCR_VISIBLE_DEVICES``) into the container so a scheduler can pin each run to a
-    single GPU without any change to the agent's command.
+    single GPU without any change to the agent's command. Also forwards the Hugging Face
+    token (``HF_TOKEN`` / ``HUGGING_FACE_HUB_TOKEN``) and ``HF_HOME`` when set on the host,
+    so gated model weights (e.g. LLaMA-2) can download inside the otherwise-networked but
+    unauthenticated container.
 
     Timeout resolves from the ``timeout`` arg, else ``R2R_DOCKER_RUN_TIMEOUT``, else the
     built-in default (6h) — large enough for a full-parity training+eval reproduction.
@@ -204,7 +207,13 @@ def docker_run(
     if workdir:
         args += ["-w", workdir]
     merged_env = dict(env or {})
-    for pin in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+    for pin in (
+        "HIP_VISIBLE_DEVICES",
+        "ROCR_VISIBLE_DEVICES",
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+        "HF_HOME",
+    ):
         if pin in os.environ and pin not in merged_env:
             merged_env[pin] = os.environ[pin]
     for k, v in merged_env.items():
