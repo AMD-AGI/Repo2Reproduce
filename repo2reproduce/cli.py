@@ -13,10 +13,12 @@ import typer
 from dotenv import load_dotenv
 from rich.console import Console
 
-from .orchestrator import RunResult, load_session_id, reproduce, resume_run
+from .orchestrator import RunResult, load_pipeline_state, reproduce, resume_run
 from .report import render_markdown
 
-app = typer.Typer(add_completion=False, help="Repo2Reproduce: paper + code -> grounded reproduction plan.")
+app = typer.Typer(
+    add_completion=False, help="Repo2Reproduce: paper + code -> grounded reproduction plan."
+)
 console = Console()
 
 
@@ -25,8 +27,11 @@ def _slug(url: str) -> str:
     return s.strip("-")[:60] or "run"
 
 
-def _emit_result(result: RunResult, run_dir: Path) -> None:
-    """Write report.json + report.md and print the report; exit non-zero on failure."""
+def _emit_result(
+    result: RunResult, run_dir: Path, amd: bool = False, execute: bool = False
+) -> None:
+    """Render the Python-assembled report and surface durable failure artifacts."""
+    del amd, execute  # completion was already decided once by the phase runner
     console.print("\n")
     console.rule("[bold]Result")
     if result.cost_usd is not None:
@@ -37,16 +42,30 @@ def _emit_result(result: RunResult, run_dir: Path) -> None:
         if result.raw_result_text:
             (run_dir / "raw_result.txt").write_text(result.raw_result_text, "utf-8")
             console.print(f"[yellow]Raw output saved to {run_dir / 'raw_result.txt'}[/yellow]")
+        console.print(f"[yellow]Pipeline state: {run_dir / 'pipeline_state.json'}[/yellow]")
+        console.print(f"[yellow]Phase artifacts: {run_dir / 'phases'}[/yellow]")
         raise typer.Exit(code=1)
 
-    (run_dir / "report.json").write_text(
-        json.dumps(result.report, indent=2, ensure_ascii=False), "utf-8"
-    )
     md = render_markdown(result.report)
-    (run_dir / "report.md").write_text(md, "utf-8")
-    console.print(f"[green]Report written to:[/green] {run_dir / 'report.md'}")
-    console.print(f"[green]JSON written to  :[/green] {run_dir / 'report.json'}\n")
+    json_name = "draft_report.json" if result.is_error else "report.json"
+    md_name = "draft_report.md" if result.is_error else "report.md"
+    json_path = run_dir / json_name
+    if not json_path.exists():
+        json_path.write_text(json.dumps(result.report, indent=2, ensure_ascii=False), "utf-8")
+    (run_dir / md_name).write_text(md, "utf-8")
+    console.print(f"[green]Report written to:[/green] {run_dir / md_name}")
+    console.print(f"[green]JSON written to  :[/green] {json_path}\n")
     console.print(md)
+
+    if result.is_error:
+        console.print("\n[red]Incomplete run — required phases or outputs are missing.[/red]")
+        if result.raw_result_text:
+            console.print(f"[red]{result.raw_result_text}[/red]")
+        console.print(
+            f"[yellow]Completed work is preserved in {run_dir / 'phases'} and "
+            f"{run_dir / 'pipeline_state.json'}. The run exits 1.[/yellow]"
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command("reproduce")
@@ -65,8 +84,10 @@ def reproduce_cmd(
         False, "--amd", help="Also make the repo run on AMD ROCm GPUs (Track 2)."
     ),
     execute: bool = typer.Option(
-        False, "--execute", help="With --amd: actually build the image and run the "
-        "reproduction on the GPU (default: plan + Dockerfile only)."
+        False,
+        "--execute",
+        help="With --amd: actually build the image and run the "
+        "reproduction on the GPU (default: plan + Dockerfile only).",
     ),
 ):
     """Read the paper + code, choose an experiment, extract config, synthesize commands."""
@@ -93,10 +114,18 @@ def reproduce_cmd(
             console.print(text, end="")
 
     result = asyncio.run(
-        reproduce(paper_url, repo_url, run_dir, target=target, on_text=_on_text,
-                  stream=stream, amd=amd, execute=execute)
+        reproduce(
+            paper_url,
+            repo_url,
+            run_dir,
+            target=target,
+            on_text=_on_text,
+            stream=stream,
+            amd=amd,
+            execute=execute,
+        )
     )
-    _emit_result(result, run_dir)
+    _emit_result(result, run_dir, amd=amd, execute=execute)
 
 
 @app.command("metrics")
@@ -182,17 +211,19 @@ def seed_memory_cmd():
 
 @app.command("resume")
 def resume_cmd(
-    run_dir: Path = typer.Argument(..., help="A prior run dir (must contain session.json)."),
+    run_dir: Path = typer.Argument(
+        ..., help="A prior run dir containing pipeline_state.json and phase artifacts."
+    ),
     instruction: str = typer.Argument(
-        ..., help="What to redo, e.g. 'Pick a different experiment (Table 3) and update'."
+        ..., help="Additional guidance for failed or unfinished phases."
     ),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress streamed agent text."),
     stream: bool = typer.Option(False, "--stream", help="Live token streaming of progress."),
 ):
-    """Continue a prior run in its original session (reuses the paper parse + repo clone)."""
+    """Resume failed/missing phases from durable artifacts."""
     load_dotenv()
-    if load_session_id(run_dir) is None:
-        console.print(f"[red]No session.json in {run_dir}. Run `r2r reproduce` first.[/red]")
+    if load_pipeline_state(run_dir) is None:
+        console.print(f"[red]No pipeline_state.json in {run_dir}. Run `r2r reproduce` first.[/red]")
         raise typer.Exit(code=1)
 
     console.rule("[bold]Repo2Reproduce — resume")
