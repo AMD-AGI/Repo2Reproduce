@@ -258,11 +258,6 @@ def evaluate_runs(
                 )
             )
             continue
-        # Incomplete/cancelled workflows are not reproduction outcomes. Keep
-        # their failure reports on disk, but exclude them from Exec Rate and
-        # Performance Gap aggregation (issue #5).
-        if report.get("run_status") in {"incomplete", "cancelled"}:
-            continue
         summary.runs.append(
             metric_from_report(report, name, reference_override=references.get(name))
         )

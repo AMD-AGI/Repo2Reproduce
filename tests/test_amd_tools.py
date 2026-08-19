@@ -106,8 +106,9 @@ def test_validate_dockerfile_accepts_good_base():
     assert res["content"] == good
 
 
-def test_docker_run_timeout_returns_diagnostics(monkeypatch):
+def test_docker_run_timeout_returns_diagnostics(tmp_path, monkeypatch):
     monkeypatch.setattr(amd_tools, "docker_available", lambda: True)
+    monkeypatch.setenv("R2R_RUN_DIR", str(tmp_path))
 
     def timeout(*_args, **_kwargs):
         raise amd_tools.subprocess.TimeoutExpired(
@@ -122,10 +123,10 @@ def test_docker_run_timeout_returns_diagnostics(monkeypatch):
 
     assert res["ok"] is False
     assert res["timed_out"] is True
-    assert res["timeout_seconds"] == 42
-    assert res["exit_code"] == 124
-    assert "pilot output" in res["output"]
-    assert "Increase the timeout" in res["error"]
+    assert res["timeout_used"] == 42
+    assert res["exit_code"] == -1
+    assert "exceeded 42s" in res["output"]
+    assert (tmp_path / "amd_run" / "docker_logs").is_dir()
 
 
 def test_seed_amd_memory(tmp_path, monkeypatch):

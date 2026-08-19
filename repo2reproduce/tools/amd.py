@@ -24,22 +24,24 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-_DEFAULT_DOCKER_RUN_TIMEOUT = 21600
-_DEFAULT_DOCKER_BUILD_TIMEOUT = 7200
+# Default container time limits (seconds). Raised well beyond the old 3600s so a FULL
+# paper-parity reproduction (full dataset, all epochs, full eval) can run to completion in
+# a single synchronous docker_run. Override per-host via the env vars below.
+_DEFAULT_DOCKER_RUN_TIMEOUT = 21600  # 6h
+_DEFAULT_DOCKER_BUILD_TIMEOUT = 7200  # 2h
 
 
 def _resolve_timeout(explicit: Optional[int], env_var: str, default: int) -> int:
-    """Timeout precedence: explicit argument, environment, built-in default."""
+    """Timeout precedence: explicit arg > env var (``env_var``) > built-in default."""
     if explicit is not None:
         return int(explicit)
-    value = os.environ.get(env_var)
-    if value:
+    env = os.environ.get(env_var)
+    if env:
         try:
-            return int(value)
+            return int(env)
         except ValueError:
             pass
     return default
-
 
 # GPU device flags for `docker run` on an AMD/ROCm host.
 ROCM_DOCKER_DEVICE_ARGS = [
@@ -134,19 +136,15 @@ def docker_available() -> bool:
     return shutil.which("docker") is not None
 
 
-def docker_build(
-    context_dir: Path,
-    tag: str,
-    timeout: Optional[int] = None,
-) -> dict[str, Any]:
-    """Build an image. Returns exit code + tail of the build log (for error feedback)."""
+def docker_build(context_dir: Path, tag: str, timeout: Optional[int] = None) -> dict[str, Any]:
+    """Build an image. Returns exit code + tail of the build log (for error feedback).
+
+    Timeout resolves from the ``timeout`` arg, else ``R2R_DOCKER_BUILD_TIMEOUT``, else the
+    built-in default (2h) — so slow ROCm builds are not killed prematurely.
+    """
     if not docker_available():
         return {"ok": False, "error": "docker not found on host"}
-    resolved = _resolve_timeout(
-        timeout,
-        "R2R_DOCKER_BUILD_TIMEOUT",
-        _DEFAULT_DOCKER_BUILD_TIMEOUT,
-    )
+    resolved = _resolve_timeout(timeout, "R2R_DOCKER_BUILD_TIMEOUT", _DEFAULT_DOCKER_BUILD_TIMEOUT)
     try:
         proc = subprocess.run(
             ["docker", "build", "-t", tag, "."],
@@ -158,13 +156,11 @@ def docker_build(
     except subprocess.TimeoutExpired:
         return {
             "ok": False,
-            "exit_code": 124,
+            "exit_code": -1,
             "timed_out": True,
             "timeout_used": resolved,
-            "log_tail": (
-                f"docker build exceeded {resolved}s. Raise "
-                "R2R_DOCKER_BUILD_TIMEOUT for a legitimately longer build."
-            ),
+            "log_tail": f"docker build exceeded {resolved}s and was killed. "
+            "Raise R2R_DOCKER_BUILD_TIMEOUT if the build legitimately needs longer.",
             "tag": tag,
         }
     log = (proc.stdout + "\n" + proc.stderr)
@@ -190,82 +186,67 @@ def docker_run(
 
     Forwards the host's GPU-pinning env (``HIP_VISIBLE_DEVICES`` /
     ``ROCR_VISIBLE_DEVICES``) into the container so a scheduler can pin each run to a
-    single GPU without any change to the agent's command.
+    single GPU without any change to the agent's command. Also forwards the Hugging Face
+    token (``HF_TOKEN`` / ``HUGGING_FACE_HUB_TOKEN``) and ``HF_HOME`` when set on the host,
+    so gated model weights (e.g. LLaMA-2) can download inside the otherwise-networked but
+    unauthenticated container.
+
+    Timeout resolves from the ``timeout`` arg, else ``R2R_DOCKER_RUN_TIMEOUT``, else the
+    built-in default (6h) — large enough for a full-parity training+eval reproduction.
+
+    The FULL stdout/stderr is streamed to a persisted log file under
+    ``<run_dir>/amd_run/docker_logs/`` (observable live via ``tail -f``); the returned
+    ``output`` is only a tail, with ``log_file`` pointing at the complete log.
     """
     if not docker_available():
         return {"ok": False, "error": "docker not found on host"}
-    resolved = _resolve_timeout(
-        timeout,
-        "R2R_DOCKER_RUN_TIMEOUT",
-        _DEFAULT_DOCKER_RUN_TIMEOUT,
-    )
+    resolved = _resolve_timeout(timeout, "R2R_DOCKER_RUN_TIMEOUT", _DEFAULT_DOCKER_RUN_TIMEOUT)
     args = ["docker", "run", "--rm"]
     if gpus:
         args += ROCM_DOCKER_DEVICE_ARGS
     if workdir:
         args += ["-w", workdir]
     merged_env = dict(env or {})
-    for pin in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+    for pin in (
+        "HIP_VISIBLE_DEVICES",
+        "ROCR_VISIBLE_DEVICES",
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+        "HF_HOME",
+    ):
         if pin in os.environ and pin not in merged_env:
             merged_env[pin] = os.environ[pin]
     for k, v in merged_env.items():
         args += ["-e", f"{k}={v}"]
     args += [tag, "bash", "-lc", command]
+
     run_dir = Path(os.environ.get("R2R_RUN_DIR", "runs/_default"))
     log_dir = run_dir / "amd_run" / "docker_logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"docker_run_{time.strftime('%Y%m%d-%H%M%S')}.log"
 
     timed_out = False
-    with log_path.open("w", encoding="utf-8") as log_file:
+    with log_path.open("w", encoding="utf-8") as f:
         try:
-            proc = subprocess.run(
-                args,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                timeout=resolved,
-            )
-            return_code = proc.returncode
-        except subprocess.TimeoutExpired as exc:
-            return_code = 124
+            proc = subprocess.run(args, stdout=f, stderr=subprocess.STDOUT, timeout=resolved)
+            rc = proc.returncode
+        except subprocess.TimeoutExpired:
+            rc = -1
             timed_out = True
-            stdout = (
-                exc.stdout.decode()
-                if isinstance(exc.stdout, bytes)
-                else (exc.stdout or "")
-            )
-            stderr = (
-                exc.stderr.decode()
-                if isinstance(exc.stderr, bytes)
-                else (exc.stderr or "")
-            )
-            if stdout or stderr:
-                log_file.write(stdout + "\n" + stderr + "\n")
-            log_file.write(
-                f"\n[r2r] docker_run timed out after {resolved}s. Increase the "
-                "timeout after measuring a pilot ETA rather than reducing scope.\n"
+            f.write(
+                f"\n[r2r] docker run exceeded {resolved}s and was killed. "
+                "Raise R2R_DOCKER_RUN_TIMEOUT (or pass a larger timeout) if the job "
+                "legitimately needs longer.\n"
             )
 
-    output = log_path.read_text(encoding="utf-8", errors="replace")
+    full = log_path.read_text(encoding="utf-8", errors="replace")
     return {
-        "ok": return_code == 0 and not timed_out,
+        "ok": (rc == 0) and not timed_out,
+        "exit_code": rc,
         "timed_out": timed_out,
-        "timeout_seconds": resolved,
         "timeout_used": resolved,
-        "exit_code": return_code,
         "log_file": str(log_path),
-        "output": output[-8000:],
-        **(
-            {
-                "error": (
-                    f"docker_run timed out after {resolved}s; full partial output "
-                    f"is preserved at {log_path}. Increase the timeout after "
-                    "measuring a pilot ETA rather than reducing scope."
-                )
-            }
-            if timed_out
-            else {}
-        ),
+        "output": full[-8000:],
     }
 
 

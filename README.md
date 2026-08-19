@@ -25,17 +25,20 @@ quote (with a page locator) or a real file path/flag in the code.
 
 ## How it works
 
-A Claude Agent SDK orchestrator coordinates specialized subagents.
+A deterministic Python phase runner controls ordering, dependencies, parallel groups,
+optional skips, persistence, and completion. Each phase is still performed by a focused
+Claude Agent SDK worker with its own prompt and tools.
 
-Two independent Markdown reviewers surround the main pipeline:
+Two independent Markdown reviewers surround those structured phases:
 
-- **Pre-run verifier** — reads the paper and repo first, then writes `preflight.md`
-  covering local reproducibility, data/setup identity, required comparisons, and blockers.
-- **Final verifier** — reads `preflight.md`, the execution logs, and the final report, then
-  writes `final_review.md` covering unsupported numbers, silent scope changes, and whether
-  the conclusion is fair.
+- The **pre-run verifier** reads the bootstrapped paper and repo before experiment
+  selection and writes `preflight.md` with local-reproducibility blockers, data/setup
+  checks, and the minimum meaningful experiment scope.
+- The **final verifier** reads `preflight.md`, phase artifacts, raw Docker logs, and the
+  draft/final report and writes `final_review.md` with unsupported numbers, silent scope
+  changes, and conclusion caveats.
 
-These reviews are advisory and intentionally do not use a strict JSON schema.
+These reviews are advisory and intentionally do not use the phase JSON schemas.
 
 **Track 1 (always):**
 
@@ -194,14 +197,14 @@ HIP_VISIBLE_DEVICES=0 r2r reproduce <paper_url> <repo_url> --amd --execute
 Artifacts land in `runs/<timestamp>-<repo>/`:
 
 - `report.md` / `report.json` — selected experiment, configuration, grounded commands,
-  and (with `--amd`) the ROCm Dockerfile + achieved metric.
-- `preflight.md` — independent paper/repo feasibility review written before orchestration.
-- `final_review.md` — independent review of the execution evidence and final conclusion.
+  and (with `--amd`) the ROCm Dockerfile + achieved metric. These are written only when
+  the mode-specific report is complete.
+- `pipeline_state.json` and `phases/*.json` — durable status/output for every phase.
+  Failed runs keep these files plus `draft_report.json`, so `r2r resume` can reuse
+  successful phases and retry only failed or unfinished work.
+- `preflight.md` / `final_review.md` — independent advisory reviews before experiment
+  selection and after report assembly.
 - the parsed paper and the cloned repo.
-
-Execute-mode reports also include `run_status`. Incomplete/cancelled runs exit non-zero
-and are excluded from aggregate execution metrics. If the final SDK structured output is
-less complete than an earlier `save_report` artifact, the saved report is preserved.
 
 ## Notes
 

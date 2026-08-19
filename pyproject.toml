@@ -8,8 +8,9 @@ license = { text = "MIT" }
 authors = [{ name = "Repo2Reproduce" }]
 
 dependencies = [
-    # Claude Agent SDK (the agent loop, subagents, custom MCP tools, hooks)
-    "claude-agent-sdk>=0.2.0",
+    # Claude Agent SDK (isolated phase workers, structured output, custom MCP tools, hooks)
+    # 0.2.136+ includes the lifecycle/structured-result fixes required by phase workers.
+    "claude-agent-sdk>=0.2.136",
     # --- Strict paper-reading layer (OpenDataLoader PDF ONLY; Java-based, no torch) ---
     "opendataloader-pdf>=2.4.0",
     # Ingestion / utilities
