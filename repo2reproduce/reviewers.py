@@ -120,9 +120,10 @@ async def run_preflight_review(
         f"PAPER_URL: {paper_url}\n"
         f"REPO_URL: {repo_url}\n"
         f"REQUESTED_TARGET: {target or '(choose the main locally testable claim)'}\n\n"
-        "First call ingest_paper and clone_repo, then inspect paper.md, "
-        "paper_parse.json, the repo map, configs, data/evaluation code, and "
-        "README. Return only the requested Markdown review."
+        "The deterministic bootstrap normally prepared paper/ and repo/ already. "
+        "Inspect paper.md, paper_parse.json, the repo map, configs, "
+        "data/evaluation code, and README. Call ingest_paper or clone_repo only "
+        "if those artifacts are missing. Return only the requested Markdown review."
     )
     tools = [
         "Read",

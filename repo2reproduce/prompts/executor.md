@@ -10,26 +10,31 @@ training, and every subsequent poll runs in a brand-new empty container that fin
 This is the #1 execution trap.
 
 Instead, run the training-and-evaluation SYNCHRONOUSLY in a SINGLE docker_run call, in the
-foreground, and pass a large `timeout` (seconds) sized to the job. The call blocks until
-training finishes and returns the full stdout containing the final metric.
+foreground, and pass a large `timeout` (seconds) sized to the job. docker_run accepts a
+`timeout` parameter (defaults to R2R_DOCKER_RUN_TIMEOUT, 6h) and streams full output to a
+log file (the result includes `log_file`, `timeout_used`, and `timed_out`).
 
-Do NOT reduce epochs, samples, seeds, comparison arms, or evaluation scope unless the
-orchestrator explicitly says the user approved that reduction. If the full paper protocol
-cannot run, return `executed: false` and explain why; do not turn a smaller proxy into a
-paper-level match.
+DEFAULT TO FULL PARITY. Reproduce the paper's FULL configuration — the full dataset, all
+epochs, the full evaluation set / all tasks — so the achieved metric is directly comparable
+to the paper target. Estimate the runtime and pass a `timeout` that comfortably covers it
+(e.g. 14400 or more for a multi-hour train+eval). Do NOT shrink the job just to make it
+short. Do not reduce epochs, samples, seeds, comparison arms, or evaluation scope unless
+the phase task explicitly says `SCOPE_REDUCTION_APPROVED: True`. Otherwise return
+`executed: false` and explain why the full protocol could not run.
 
 Steps:
 1. First do quick setup/data steps via docker_run as needed. Set ROCm env
    (FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE, FLASH_ATTENTION_TRITON_AMD_AUTOTUNE=0,
    PYTORCH_TUNABLEOP_ENABLED=0). TunableOp is OFF by default because variable-length
    inference can re-tune every shape and become dramatically slower.
-2. Before a long run, execute a small 20-50 sample/batch pilot only to measure throughput,
-   host/GPU memory growth, and ETA. A pilot is a health check, not the reported result.
-   Investigate an implausible ETA or growing host RSS before continuing.
-3. Run the FULL train+eval protocol as ONE foreground docker_run with a timeout sized to
-   the measured pilot ETA. If it cannot fit, report `executed: false` unless a scope
-   reduction was explicitly approved.
-4. Extract the achieved metric from that call's returned output.
+2. Before a long run, execute a 20-50 sample/batch pilot only to measure throughput,
+   host/GPU memory growth, and ETA. Investigate an implausible ETA or growing host RSS.
+   The pilot is a health check, not the reported result.
+3. Run the FULL train+eval as ONE foreground docker_run, passing a `timeout` sized to the
+   full protocol. The call blocks until it finishes and returns the final metric (full log
+   at `log_file`). Reproduce the exact paper configuration; on a single GPU, match the
+   paper's effective batch size via gradient accumulation rather than dropping to a subset.
+4. Extract the achieved metric from that call's returned output (or the `log_file`).
 
 Return ONLY JSON (Output 5 shape):
 {

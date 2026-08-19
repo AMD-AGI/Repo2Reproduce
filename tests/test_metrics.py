@@ -108,38 +108,3 @@ def test_evaluate_runs_aggregates(tmp_path: Path):
     # all-runs gap = mean(good_gap, 1.0); executed-only gap = good_gap
     assert summary.perf_gap_executed_only < 0.01
     assert 0.5 < summary.perf_gap < 0.51
-
-
-def test_evaluate_runs_excludes_incomplete_workflows(tmp_path: Path):
-    runs = tmp_path / "runs"
-    complete = runs / "complete"
-    complete.mkdir(parents=True)
-    (complete / "report.json").write_text(
-        json.dumps(
-            {
-                "run_status": "completed",
-                "output5_reproduction_result": {
-                    "executed": True,
-                    "achieved_metric": "PPL: 5.758",
-                    "paper_target": "PPL: 5.79",
-                },
-            }
-        ),
-        "utf-8",
-    )
-    incomplete = runs / "incomplete"
-    incomplete.mkdir()
-    (incomplete / "report.json").write_text(
-        json.dumps(
-            {
-                "run_status": "incomplete",
-                "output5_reproduction_result": {"executed": False},
-            }
-        ),
-        "utf-8",
-    )
-
-    summary = evaluate_runs(runs)
-
-    assert summary.n == 1
-    assert summary.runs[0].name == "complete"

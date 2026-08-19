@@ -7,9 +7,9 @@ enforce structured output.
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # --------------------------------------------------------------------------- #
@@ -32,6 +32,63 @@ class CodeRef(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# Persisted intermediate worker outputs
+# --------------------------------------------------------------------------- #
+class PaperMap(BaseModel):
+    """Flexible but structured contract for the paper-analysis phase."""
+
+    model_config = ConfigDict(extra="allow")
+
+    title: Optional[str] = None
+    experiments: list[dict[str, Any]] = Field(default_factory=list)
+    hyperparameters: list[dict[str, Any]] = Field(default_factory=list)
+    datasets: Any = Field(default_factory=list)
+    models: Any = Field(default_factory=list)
+    hardware: Any = Field(default_factory=list)
+
+
+class CodeMap(BaseModel):
+    """Repository map consumed by the selection/configuration phases."""
+
+    model_config = ConfigDict(extra="allow")
+
+    entry_points: list[dict[str, Any]] = Field(default_factory=list)
+    cli_flags: list[dict[str, Any]] = Field(default_factory=list)
+    configs: list[dict[str, Any]] = Field(default_factory=list)
+    datasets: Any = None
+    environment: Any = None
+    readme_commands: list[Any] = Field(default_factory=list)
+
+
+class BaseImageSelection(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    base_image: str
+    rationale: str
+    python: Optional[str] = None
+    risks: list[str] = Field(default_factory=list)
+
+
+class EnvironmentPort(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    requirements: list[str] = Field(default_factory=list)
+    dropped_pins: list[dict[str, Any]] = Field(default_factory=list)
+    extra_install_cmds: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class KernelMigration(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    has_custom_kernel: bool = False
+    sources: list[str] = Field(default_factory=list)
+    build_script: Optional[str] = None
+    patch_file: Optional[str] = None
+    note: Optional[str] = None
+
+
+# --------------------------------------------------------------------------- #
 # Output 1: experiment selection (paper-grounded)
 # --------------------------------------------------------------------------- #
 class ExperimentSelection(BaseModel):
@@ -41,7 +98,9 @@ class ExperimentSelection(BaseModel):
         default_factory=list,
         description="Exact paper text + the table/figure that defines the chosen experiment.",
     )
-    why_this_one: str = Field(..., description="Why this experiment (paper clarity x code support).")
+    why_this_one: str = Field(
+        ..., description="Why this experiment (paper clarity x code support)."
+    )
     alternatives_considered: list[str] = Field(default_factory=list)
 
 
@@ -91,6 +150,26 @@ class Command(BaseModel):
 class ReplicationPlan(BaseModel):
     commands: list[Command] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
+
+
+class ReconciliationResult(BaseModel):
+    """Updated configuration/commands after the AMD port."""
+
+    model_config = ConfigDict(extra="allow")
+
+    updated_output2: Configuration | Literal["unchanged"]
+    updated_output3: ReplicationPlan
+    changes: list[str] = Field(default_factory=list)
+
+
+class VerificationResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    issues_found: list[str] = Field(default_factory=list)
+    corrections_applied: list[str] = Field(default_factory=list)
+    gaps_and_assumptions: list[str] = Field(default_factory=list)
+    confidence: Literal["high", "medium", "low"] = "medium"
+    confidence_rationale: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #
