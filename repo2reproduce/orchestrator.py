@@ -501,6 +501,14 @@ async def _run_worker_phase(
             last_output = outcome.output
             session_id = outcome.session_id
             if outcome.output is not None and not outcome.is_error:
+                semantic_error = _semantic_phase_error(
+                    phase,
+                    outcome.output,
+                    execute=execute,
+                )
+                if semantic_error:
+                    last_error = semantic_error
+                    continue
                 return await store.save(
                     PhaseRecord(
                         phase=phase,
@@ -526,6 +534,23 @@ async def _run_worker_phase(
             session_id=session_id,
         )
     )
+
+
+def _semantic_phase_error(
+    phase: str,
+    output: dict[str, Any],
+    *,
+    execute: bool,
+) -> Optional[str]:
+    """Reject schema-valid outputs that contradict the active run mode."""
+    if phase == "build-verifier" and execute:
+        status = str(output.get("build_status") or "")
+        if status == "not_attempted":
+            return (
+                "execute mode cannot accept build_status='not_attempted'; "
+                "return verified, build_failed, or integrity_failed with evidence"
+            )
+    return None
 
 
 def _phase_task(

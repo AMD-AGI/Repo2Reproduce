@@ -140,6 +140,32 @@ def _run(tmp_path, *, amd=False, execute=False):
     )
 
 
+def test_execute_mode_rejects_not_attempted_build_output():
+    error = orchestrator._semantic_phase_error(
+        "build-verifier",
+        {"build_status": "not_attempted"},
+        execute=True,
+    )
+    assert error
+    assert "execute mode" in error
+    assert (
+        orchestrator._semantic_phase_error(
+            "build-verifier",
+            {"build_status": "verified"},
+            execute=True,
+        )
+        is None
+    )
+    assert (
+        orchestrator._semantic_phase_error(
+            "build-verifier",
+            {"build_status": "not_attempted"},
+            execute=False,
+        )
+        is None
+    )
+
+
 def test_track1_success_persists_every_phase(monkeypatch, tmp_path):
     calls = _install_fakes(monkeypatch, _outputs())
 
