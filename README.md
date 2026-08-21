@@ -183,11 +183,12 @@ HIP_VISIBLE_DEVICES=0 r2r reproduce <paper_url> <repo_url> --amd --execute
 Artifacts land in `runs/<timestamp>-<repo>/`:
 
 - `report.md` / `report.json` — selected experiment, configuration, grounded commands,
-  and (with `--amd`) the ROCm Dockerfile + achieved metric. These are written only when
-  the mode-specific report is complete.
-- `pipeline_state.json` and `phases/*.json` — durable status/output for every phase.
-  Failed runs keep these files plus `draft_report.json`, so `r2r resume` can reuse
-  successful phases and retry only failed or unfinished work.
+  and (with `--amd`) the ROCm Dockerfile + achieved metric. `report.json` is **always**
+  written and carries a `validation_status` (`complete` / `partial` / `incomplete`) plus
+  `missing_required` / `missing_optional`, so valid results (e.g. a successful executor
+  run) are never discarded just because one advisory output is absent.
+- `pipeline_state.json` and `phases/*.json` — durable status/output for every phase, so
+  `r2r resume` can reuse successful phases and retry only failed or unfinished work.
 - the parsed paper and the cloned repo.
 
 ## Notes

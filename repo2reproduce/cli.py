@@ -46,26 +46,43 @@ def _emit_result(
         console.print(f"[yellow]Phase artifacts: {run_dir / 'phases'}[/yellow]")
         raise typer.Exit(code=1)
 
+    # The runner always writes report.json now; mirror the Markdown next to it.
     md = render_markdown(result.report)
-    json_name = "draft_report.json" if result.is_error else "report.json"
-    md_name = "draft_report.md" if result.is_error else "report.md"
-    json_path = run_dir / json_name
+    json_path = run_dir / "report.json"
     if not json_path.exists():
         json_path.write_text(json.dumps(result.report, indent=2, ensure_ascii=False), "utf-8")
-    (run_dir / md_name).write_text(md, "utf-8")
-    console.print(f"[green]Report written to:[/green] {run_dir / md_name}")
+    (run_dir / "report.md").write_text(md, "utf-8")
+    console.print(f"[green]Report written to:[/green] {run_dir / 'report.md'}")
     console.print(f"[green]JSON written to  :[/green] {json_path}\n")
     console.print(md)
 
+    status = result.report.get("validation_status", "complete")
+    missing_required = result.report.get("missing_required") or []
+    missing_optional = result.report.get("missing_optional") or []
+
     if result.is_error:
-        console.print("\n[red]Incomplete run — required phases or outputs are missing.[/red]")
+        console.print(
+            "\n[red]Incomplete run — required outputs are missing "
+            "(the report was still written for inspection/resume).[/red]"
+        )
+        for item in missing_required:
+            console.print(f"[red]  - {item}[/red]")
         if result.raw_result_text:
             console.print(f"[red]{result.raw_result_text}[/red]")
         console.print(
-            f"[yellow]Completed work is preserved in {run_dir / 'phases'} and "
-            f"{run_dir / 'pipeline_state.json'}. The run exits 1.[/yellow]"
+            f"[yellow]Completed work is preserved in {run_dir / 'phases'}, "
+            f"{run_dir / 'report.json'}, and {run_dir / 'pipeline_state.json'}. "
+            "The run exits 1.[/yellow]"
         )
         raise typer.Exit(code=1)
+
+    if status == "partial":
+        console.print(
+            "\n[yellow]Partial run — valid results written to report.json; "
+            "advisory gaps:[/yellow]"
+        )
+        for item in missing_optional:
+            console.print(f"[yellow]  - {item}[/yellow]")
 
 
 @app.command("reproduce")

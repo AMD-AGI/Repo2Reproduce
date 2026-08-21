@@ -169,8 +169,12 @@ def test_parallel_failure_does_not_cancel_independent_worker(monkeypatch, tmp_pa
     assert store.load("code-cartographer").status == "succeeded"
     assert store.load("experiment-selector").status == "skipped"
     assert "code-cartographer" in calls
-    assert (tmp_path / "draft_report.json").exists()
-    assert not (tmp_path / "report.json").exists()
+    # report.json is now ALWAYS written (valid work is never discarded); the embedded
+    # status records that this run is incomplete.
+    assert (tmp_path / "report.json").exists()
+    report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
+    assert report["validation_status"] == "incomplete"
+    assert report["missing_required"]
 
 
 def test_no_custom_kernel_is_explicit_optional_skip(monkeypatch, tmp_path):

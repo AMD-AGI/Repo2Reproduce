@@ -18,6 +18,9 @@ def render_markdown(report: dict[str, Any]) -> str:
     out.append(f"- **Confidence:** {report.get('confidence', 'unknown')}")
     if report.get("confidence_rationale"):
         out.append(f"  - {report['confidence_rationale']}")
+    status = report.get("validation_status")
+    if status and status != "complete":
+        out.append(f"- **Validation status:** {status}")
     out.append("")
 
     # Output 1
@@ -156,6 +159,22 @@ def render_markdown(report: dict[str, Any]) -> str:
             out.append(f"- {g}")
     else:
         out.append("- None recorded.")
+
+    missing_required = report.get("missing_required") or []
+    missing_optional = report.get("missing_optional") or []
+    schema_warnings = report.get("schema_warnings") or []
+    if missing_required:
+        out.append("\n**Missing required outputs (run is incomplete):**")
+        for m in missing_required:
+            out.append(f"- {m}")
+    if missing_optional:
+        out.append("\n**Missing optional outputs (advisory):**")
+        for m in missing_optional:
+            out.append(f"- {m}")
+    if schema_warnings:
+        out.append("\n**Schema warnings (kept unvalidated):**")
+        for w in schema_warnings:
+            out.append(f"- {w}")
     out.append("")
 
     return "\n".join(out)

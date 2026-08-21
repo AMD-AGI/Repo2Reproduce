@@ -30,7 +30,7 @@ from pydantic import BaseModel, ValidationError
 
 from . import config
 from .agents import build_agents
-from .gate import report_is_complete
+from .gate import ReportAssessment, assess_report
 from .hooks import build_hooks
 from .provider import ensure_runtime_path, provider_env
 from .schemas import (
@@ -40,7 +40,6 @@ from .schemas import (
     Configuration,
     EnvironmentPort,
     ExperimentSelection,
-    FinalReport,
     KernelMigration,
     PaperMap,
     ReconciliationResult,
@@ -195,10 +194,17 @@ class PipelineStore:
             self._write_state()
         return record
 
-    async def finish(self, status: str, missing: Optional[list[str]] = None) -> None:
+    async def finish(
+        self,
+        status: str,
+        missing: Optional[list[str]] = None,
+        validation_status: Optional[str] = None,
+    ) -> None:
         async with self._lock:
             self.state["status"] = status
             self.state["missing"] = missing or []
+            if validation_status is not None:
+                self.state["validation_status"] = validation_status
             self._write_state()
 
 
@@ -732,6 +738,39 @@ def _phase_failure_gaps(store: PipelineStore) -> list[str]:
     return gaps
 
 
+# Each output section is validated against the *same* model the phase used, so valid
+# blocks are normalized and any single malformed block is kept as-is instead of
+# discarding the whole report (see _validate_sections).
+_SECTION_MODELS: dict[str, Type[BaseModel]] = {
+    "output1_experiment_selection": ExperimentSelection,
+    "output2_configuration": Configuration,
+    "output3_replication_plan": ReplicationPlan,
+    "output4_amd_environment": AmdEnvironment,
+    "output5_reproduction_result": ReproductionResult,
+}
+
+
+def _validate_sections(report: dict[str, Any]) -> list[str]:
+    """Tolerant, per-section validation (Change 3).
+
+    Normalizes each output block that validates against its schema and leaves any block
+    that fails *as-is*, recording a warning. This means one malformed nested field can
+    never discard the entire report — every other valid section, including a successful
+    executor result, survives. Mutates ``report`` in place; returns human-readable
+    warnings.
+    """
+    warnings: list[str] = []
+    for key, model in _SECTION_MODELS.items():
+        value = report.get(key)
+        if not isinstance(value, dict):
+            continue
+        try:
+            report[key] = model.model_validate(value).model_dump(mode="json")
+        except ValidationError as exc:
+            warnings.append(f"{key}: kept unvalidated ({exc.error_count()} schema issue(s))")
+    return warnings
+
+
 def _assemble_report(
     store: PipelineStore,
     *,
@@ -739,7 +778,7 @@ def _assemble_report(
     repo_url: str,
     amd: bool,
     execute: bool,
-) -> tuple[dict[str, Any], bool, list[str]]:
+) -> tuple[dict[str, Any], ReportAssessment, list[str]]:
     paper_map = store.output("paper-analyst") or {}
     verifier = store.output("verifier") or {}
     configuration = store.output("config-extractor")
@@ -775,14 +814,20 @@ def _assemble_report(
     if execute and store.output("executor") is not None:
         report["output5_reproduction_result"] = store.output("executor")
 
-    ok, missing = report_is_complete(report, amd=amd, execute=execute)
-    if ok:
-        try:
-            report = FinalReport.model_validate(report).model_dump(mode="json")
-        except ValidationError as exc:
-            ok = False
-            missing = [f"FinalReport schema validation failed: {exc}"]
-    return report, ok, missing
+    # Change 3: tolerant per-section validation (never discards the whole report).
+    schema_warnings = _validate_sections(report)
+    # Change 2: graded completeness (hard = blocking, soft = advisory).
+    assessment = assess_report(report, amd=amd, execute=execute)
+
+    # Change 1: the report is always written; this status block records the verdict so a
+    # consumer (and `r2r metrics`) can see what — if anything — was incomplete.
+    report["validation_status"] = assessment.status
+    report["missing_required"] = assessment.hard_missing
+    report["missing_optional"] = assessment.soft_missing
+    if schema_warnings:
+        report["schema_warnings"] = schema_warnings
+
+    return report, assessment, schema_warnings
 
 
 async def _run_pipeline(
@@ -1086,25 +1131,28 @@ async def _run_pipeline(
             kind="blocked",
         )
 
-    report, ok, missing = _assemble_report(
+    report, assessment, _warnings = _assemble_report(
         store,
         paper_url=paper_url,
         repo_url=repo_url,
         amd=amd,
         execute=execute,
     )
-    _atomic_json(run_dir / "draft_report.json", report)
-    if ok:
-        _atomic_json(run_dir / "report.json", report)
-    else:
-        (run_dir / "report.json").unlink(missing_ok=True)
-    await store.finish("completed" if ok else "failed", missing)
+    # Change 1: always write the canonical report.json. Valid results (including a
+    # successful executor run) are never discarded; the embedded validation_status
+    # records whether the report is complete/partial/incomplete.
+    _atomic_json(run_dir / "report.json", report)
+    await store.finish(
+        "completed" if assessment.ok else "failed",
+        assessment.hard_missing + assessment.soft_missing,
+        validation_status=assessment.status,
+    )
     return RunResult(
         run_dir=run_dir,
         report=report,
-        raw_result_text=None if ok else "; ".join(missing),
+        raw_result_text=None if assessment.ok else "; ".join(assessment.hard_missing),
         cost_usd=store.total_cost(),
-        is_error=not ok,
+        is_error=not assessment.ok,
     )
 
 
