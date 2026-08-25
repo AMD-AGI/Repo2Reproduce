@@ -7,6 +7,18 @@ from pathlib import Path
 from repo2reproduce.tools import code as code_intel
 
 
+def test_parse_github_tree_url():
+    base, branch, subpath = code_intel._parse_github_tree_url(
+        "https://github.com/facebookresearch/luckmatters/tree/yuandong3/ssl/real-dataset"
+    )
+    assert base == "https://github.com/facebookresearch/luckmatters.git"
+    assert branch == "yuandong3"
+    assert subpath == "ssl/real-dataset"
+
+    plain = "https://github.com/org/repo"
+    assert code_intel._parse_github_tree_url(plain) == (plain, None, None)
+
+
 def test_extract_argparse(tmp_path: Path):
     src = tmp_path / "train.py"
     src.write_text(

@@ -161,7 +161,10 @@ def parse_paper(pdf_path: Path, work_dir: Path) -> ParsedPaper:
         "num_tables": len(tables),
         "blocks": blocks,
     }
-    parse_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Some PDF fonts decode to lone UTF-16 surrogate code points. Escaping
+    # non-ASCII keeps the JSON valid instead of failing the entire paper
+    # bootstrap with UnicodeEncodeError.
+    parse_json.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
 
     return ParsedPaper(
         pdf_path=str(pdf_path),

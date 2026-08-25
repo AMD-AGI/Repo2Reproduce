@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import ast
 import json
+import re
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -16,6 +19,17 @@ from typing import Any, Optional
 # --------------------------------------------------------------------------- #
 # Clone
 # --------------------------------------------------------------------------- #
+def _parse_github_tree_url(repo_url: str) -> tuple[str, Optional[str], Optional[str]]:
+    """Split ``github.com/org/repo/tree/branch/subdir`` into clone components."""
+    match = re.match(
+        r"^(https?://github\.com/[^/]+/[^/]+?)(?:\.git)?/tree/([^/]+)(?:/(.+))?/?$",
+        repo_url,
+    )
+    if not match:
+        return repo_url, None, None
+    return f"{match.group(1)}.git", match.group(2), match.group(3) or None
+
+
 def clone_repo(repo_url: str, dest: Path, depth: int = 1) -> dict[str, Any]:
     """Shallow-clone a public git repo to ``dest``. Returns basic metadata."""
     from git import Repo  # gitpython
@@ -23,8 +37,47 @@ def clone_repo(repo_url: str, dest: Path, depth: int = 1) -> dict[str, Any]:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() and any(dest.iterdir()):
         return {"path": str(dest), "already_present": True}
-    Repo.clone_from(repo_url, str(dest), depth=depth)
-    return {"path": str(dest), "already_present": False}
+
+    clone_url, branch, subpath = _parse_github_tree_url(repo_url)
+    if not subpath:
+        kwargs: dict[str, Any] = {"depth": depth}
+        if branch:
+            kwargs.update({"branch": branch, "single_branch": True})
+        repo = Repo.clone_from(clone_url, str(dest), **kwargs)
+        return {
+            "path": str(dest),
+            "already_present": False,
+            "source_url": clone_url,
+            "branch": branch,
+            "commit": repo.head.commit.hexsha,
+        }
+
+    # A GitHub tree URL names a branch subdirectory, not a clone endpoint.
+    # Clone into a temporary worktree and expose only the requested project
+    # subtree to the agents, avoiding an unrelated monorepo root.
+    with tempfile.TemporaryDirectory(dir=str(dest.parent)) as tmp:
+        repo = Repo.clone_from(
+            clone_url,
+            tmp,
+            depth=depth,
+            branch=branch,
+            single_branch=True,
+        )
+        source = Path(tmp) / subpath
+        if not source.is_dir():
+            raise FileNotFoundError(
+                f"GitHub tree subdirectory not found after clone: {subpath}"
+            )
+        shutil.copytree(source, dest)
+        commit = repo.head.commit.hexsha
+    return {
+        "path": str(dest),
+        "already_present": False,
+        "source_url": clone_url,
+        "branch": branch,
+        "subpath": subpath,
+        "commit": commit,
+    }
 
 
 # --------------------------------------------------------------------------- #
