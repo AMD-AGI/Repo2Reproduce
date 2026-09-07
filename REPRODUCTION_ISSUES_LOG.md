@@ -180,3 +180,69 @@ no reduction was needed and it matched the paper exactly (0.16% gap).
   full parity when the job fits the (raised) timeout, only reducing as a documented last resort.
 - Consider streaming/log-to-file for long `docker_run`s instead of the current `out[-8000:]` tail truncation
   (`tools/amd.py:169`) so long runs remain observable.
+
+---
+
+## 2026-08-31 — Top-15 ICML 2025 batch late failures — `p2p` and `topobenchmark`
+
+- **Batch dir:** `runs/batch-top-15-20260831-003754/`
+- **Mode:** `--amd --execute`, parallel runner on physical GPUs `0,1,2,3`
+- **Final batch outcome:** 15 jobs completed; 7 runner-level succeeded, 8 runner-level failed.
+
+### 1. `p2p` — mvandenhi/p2p — execution reached but no paper metric
+
+- **Run dir:** `runs/batch-top-15-20260831-003754/runs/10-p2p/`
+- **Assigned GPU:** physical GPU `0` (`ROCR_VISIBLE_DEVICES=0`, `HIP_VISIBLE_DEVICES=0`)
+- **Selected experiment:** P2P on CIFAR-10.
+- **Target result:** CIFAR-10 P2P accuracy `94.45 ± 0.29` from Table 1, recorded in
+  `runs/batch-top-15-20260831-003754/runs/10-p2p/phases/executor.json:8`.
+- **Outcome:** failed / not reproduced. The executor phase itself completed, but reported
+  `executed=false`, `match=false`, and no clean achieved metric.
+- **Issue(s) found:** full protocol infeasible under the current harness; DataLoader shared-memory
+  limitation; evaluation crash.
+- **Root cause (grounded):**
+  - Full protocol was not run; only a one-epoch pilot was run:
+    `runs/batch-top-15-20260831-003754/runs/10-p2p/phases/executor.json:5-7`.
+  - The pilot produced no comparable paper metric because test-set evaluation aborted with
+    `corrupted size vs. prev_size` / glibc heap corruption:
+    `runs/batch-top-15-20260831-003754/runs/10-p2p/phases/executor.json:7`.
+  - The executor measured about `787s` per epoch with `workers=0`; the full `10 seeds × 100 epochs`
+    protocol is estimated at about `218h` of training alone:
+    `runs/batch-top-15-20260831-003754/runs/10-p2p/phases/executor.json:11`.
+  - The runner/harness could not honor the planned `--ipc=host` / shm settings for `docker_run`,
+    so DataLoader workers crashed and the run fell back to the slow `workers=0` path:
+    `runs/batch-top-15-20260831-003754/runs/10-p2p/phases/verifier.json:8-9`.
+- **Fix idea (not yet applied):** give execution containers controllable `--ipc=host` or shm-size
+  support, persist the CIFAR dataset volume across attempts, and investigate the `fast-slic` /
+  NumPy 2 / Python 3.12 glibc crash before attempting a full multi-seed run.
+
+### 2. `topobenchmark` — geometric-intelligence/topobenchmark — AMD build verification failed
+
+- **Run dir:** `runs/batch-top-15-20260831-003754/runs/15-topobenchmark/`
+- **Assigned GPU:** physical GPU `3`; this batch was launched before the runner GPU-env fix, so the
+  parent process inherited `ROCR_VISIBLE_DEVICES=3` and `HIP_VISIBLE_DEVICES=3`. The build-verifier
+  later tested commands that explicitly set `HIP_VISIBLE_DEVICES=0` inside the container after the
+  `ROCR_VISIBLE_DEVICES=3` physical mask.
+- **Selected experiment:** TopoTune/CWN MUTAG Table 2 protocol.
+- **Target result:** Table 2 CWN/MUTAG values, including `84.26 ± 8.19` ensemble and
+  `81.70 ± 5.34` one-Hasse, recorded in
+  `runs/batch-top-15-20260831-003754/runs/15-topobenchmark/phases/verifier.json:6`.
+- **Outcome:** build failed; no AMD/ROCm build succeeded and no training/evaluation was executed.
+- **Issue(s) found:** ROCm source build of PyG compiled dependencies did not converge within the
+  build-verifier budget.
+- **Root cause (grounded):**
+  - Build-verifier status is `failed` with `phase budget exhausted before a valid output was produced`:
+    `runs/batch-top-15-20260831-003754/runs/15-topobenchmark/phases/build-verifier.json:2-6`.
+  - The final attempted Docker run failed building installable wheels for `torch-scatter` and
+    `torch-sparse`:
+    `runs/batch-top-15-20260831-003754/runs/15-topobenchmark/amd_run/docker_logs/docker_run_20260831-055822.log:781-788`.
+  - The concrete HIP compile error in `torch-sparse` was a ROCm warp-sync mask assertion
+    (`The mask must be a 64-bit integer`) while compiling for `gfx950`:
+    `runs/batch-top-15-20260831-003754/runs/15-topobenchmark/amd_run/docker_logs/docker_run_20260831-055822.log:672-690`.
+  - A narrower prior probe had shown `torch-scatter`, `torch-sparse`, and `torch-cluster` can build and
+    import when constrained for `gfx950`:
+    `runs/batch-top-15-20260831-003754/runs/15-topobenchmark/amd_run/docker_logs/docker_run_20260831-054839.log:1-11`.
+- **Fix idea (not yet applied):** rerun only if the Dockerfile pins `PYTORCH_ROCM_ARCH=gfx950`,
+  caps `MAX_JOBS`, and uses the canonical dependency recipe captured in
+  `runs/batch-top-15-20260831-003754/runs/15-topobenchmark/amd_run/Dockerfile`; otherwise treat this
+  repo as high-risk for ROCm source-build failures.

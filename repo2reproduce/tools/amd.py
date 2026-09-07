@@ -24,9 +24,9 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-# Default container time limits (seconds). Raised well beyond the old 3600s so a FULL
-# paper-parity reproduction (full dataset, all epochs, full eval) can run to completion in
-# a single synchronous docker_run. Override per-host via the env vars below.
+# Default container time limits (seconds). Raised well beyond the old 3600s so the full
+# workload for the selected result can run to completion in a single synchronous
+# docker_run. Override per-host via the env vars below.
 _DEFAULT_DOCKER_RUN_TIMEOUT = 21600  # 6h
 _DEFAULT_DOCKER_BUILD_TIMEOUT = 7200  # 2h
 

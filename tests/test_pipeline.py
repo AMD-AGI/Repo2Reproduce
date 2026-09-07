@@ -87,9 +87,10 @@ def _outputs(*, build_status: str = "not_attempted", executor_ok: bool = True):
     }
 
 
-def _install_fakes(monkeypatch, outputs, failures=None, calls=None):
+def _install_fakes(monkeypatch, outputs, failures=None, calls=None, tasks=None):
     failures = failures or set()
     calls = calls if calls is not None else []
+    tasks = tasks if tasks is not None else {}
 
     async def fake_bootstrap(phase: str, run_dir: Path, value: str):
         del value
@@ -107,6 +108,7 @@ def _install_fakes(monkeypatch, outputs, failures=None, calls=None):
     async def fake_worker(**kwargs):
         phase = kwargs["phase"]
         calls.append(phase)
+        tasks[phase] = kwargs["task"]
         if phase in failures:
             raise RuntimeError(f"fixture failure: {phase}")
         return orchestrator.WorkerOutcome(
@@ -124,7 +126,14 @@ def _install_fakes(monkeypatch, outputs, failures=None, calls=None):
     return calls
 
 
-def _run(tmp_path, *, amd=False, execute=False):
+def _run(
+    tmp_path,
+    *,
+    amd=False,
+    execute=False,
+    allow_scope_reduction=False,
+    extra_instruction=None,
+):
     return asyncio.run(
         orchestrator._run_pipeline(
             paper_url="https://example.test/paper",
@@ -133,8 +142,10 @@ def _run(tmp_path, *, amd=False, execute=False):
             target="Table 1",
             amd=amd,
             execute=execute,
+            allow_scope_reduction=allow_scope_reduction,
             on_text=None,
             stream=False,
+            extra_instruction=extra_instruction,
             enable_reviewers=False,
         )
     )
@@ -179,6 +190,50 @@ def test_track1_success_persists_every_phase(monkeypatch, tmp_path):
     assert calls.index("experiment-selector") > calls.index("paper-analyst")
     assert calls.index("config-extractor") > calls.index("experiment-selector")
     assert calls.index("command-synthesizer") > calls.index("config-extractor")
+
+
+def test_scope_instruction_only_reaches_selected_result_workload_phases(
+    monkeypatch, tmp_path
+):
+    tasks = {}
+    _install_fakes(
+        monkeypatch,
+        _outputs(build_status="verified"),
+        tasks=tasks,
+    )
+    monkeypatch.setattr(
+        orchestrator.amd_tools,
+        "detect_cuda_kernels",
+        lambda repo: {"has_custom_kernel": False, "cuda_sources": []},
+    )
+
+    result = _run(
+        tmp_path,
+        amd=True,
+        execute=True,
+        extra_instruction="USER_NOTE",
+    )
+
+    assert not result.is_error
+    assert tasks["experiment-selector"].count("USER_NOTE") == 1
+    assert "SCOPE_REDUCTION_APPROVED" not in tasks["experiment-selector"]
+    assert "SCOPE_REDUCTION_APPROVED" not in tasks["paper-analyst"]
+    assert "SCOPE_REDUCTION_APPROVED" not in tasks["code-cartographer"]
+    assert "SCOPE_REDUCTION_APPROVED" not in tasks["build-verifier"]
+
+    workload_phases = {
+        "config-extractor",
+        "command-synthesizer",
+        "reconciler",
+        "executor",
+        "verifier",
+    }
+    for phase in workload_phases:
+        task = tasks[phase]
+        assert "SCOPE_REDUCTION_APPROVED: False" in task
+        assert "samples, epochs, steps, seeds, split coverage" in task
+        assert "selected result's evaluation workload" in task
+        assert "comparison arm" not in task.lower()
 
 
 def test_parallel_failure_does_not_cancel_independent_worker(monkeypatch, tmp_path):

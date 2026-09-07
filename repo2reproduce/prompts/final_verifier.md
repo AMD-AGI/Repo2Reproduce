@@ -7,12 +7,11 @@ orchestrator's verdict.
 
 Check:
 
-- Did execution follow the data, comparison arms, seed count, checkpoint rule,
-  and full workload described in the pre-run review?
+- Did execution follow the data, split, preprocessing, seed count, checkpoint
+  rule, and full selected-result workload described in the pre-run review?
 - Does every reported number appear in execution evidence?
 - Is the measured value comparable to the paper target: same data, split,
   metric definition, units, scale, and aggregation?
-- If the claim is comparative, were all required conditions run?
 - Was a best checkpoint, best seed, or easiest subset used when the paper did
   not use that selection rule?
 - Did every required phase complete? A valid-looking report with no build,
@@ -20,9 +19,10 @@ Check:
   incomplete, not successful.
 - Is the candidate structured output emptier than a complete `report.json`
   already saved on disk? If so, identify report-overwrite corruption.
-- Was the workload reduced after an OOM or slow ETA? Compare actual
-  sample/step counts with `preflight.md`. If reduction lacks explicit human
-  approval, the number is not comparable to the paper.
+- Was the workload reduced after an OOM or slow ETA? Compare actual sample,
+  epoch, step, seed, split-coverage, sequence-length, and evaluation counts
+  with `preflight.md`. If reduction lacks explicit human approval, the number
+  is not comparable to the paper.
 - Does observed throughput indicate an unhealthy run, memory leak, or harmful
   tuning flag rather than an inherently expensive experiment?
 - Are claimed root causes measured, or only plausible stories?

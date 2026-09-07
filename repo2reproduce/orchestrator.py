@@ -858,13 +858,15 @@ async def _run_pipeline(
     scope_instruction = (
         f"SCOPE_REDUCTION_APPROVED: {allow_scope_reduction}. "
         + (
-            "Any reduction must be disclosed and cannot be presented as full paper parity."
+            "Any workload reduction for the selected result must be disclosed and cannot "
+            "be presented as full selected-result parity."
             if allow_scope_reduction
-            else "Do not reduce samples, epochs, seeds, comparison arms, or evaluation "
-            "scope. Report that the full protocol could not run instead."
+            else "Do not reduce samples, epochs, steps, seeds, split coverage, sequence "
+            "length, or the selected result's evaluation workload. Report that its full "
+            "workload could not run instead."
         )
     )
-    extra_instruction = "\n".join(
+    downstream_instruction = "\n".join(
         item for item in (extra_instruction, scope_instruction) if item
     )
 
@@ -974,7 +976,7 @@ async def _run_pipeline(
             execute=execute,
             total_budget=total_budget,
             total_turns=total_turns,
-            extra_instruction=extra_instruction,
+            extra_instruction=downstream_instruction,
             on_text=on_text,
             stream=stream,
         )
@@ -994,7 +996,7 @@ async def _run_pipeline(
             execute=execute,
             total_budget=total_budget,
             total_turns=total_turns,
-            extra_instruction=extra_instruction,
+            extra_instruction=downstream_instruction,
             on_text=on_text,
             stream=stream,
         )
@@ -1058,7 +1060,7 @@ async def _run_pipeline(
                 execute=execute,
                 total_budget=total_budget,
                 total_turns=total_turns,
-                extra_instruction=extra_instruction,
+                extra_instruction=downstream_instruction,
                 on_text=on_text,
                 stream=stream,
             )
@@ -1084,7 +1086,7 @@ async def _run_pipeline(
                 execute=execute,
                 total_budget=total_budget,
                 total_turns=total_turns,
-                extra_instruction=extra_instruction,
+                extra_instruction=downstream_instruction,
                 on_text=on_text,
                 stream=stream,
             )
@@ -1126,7 +1128,7 @@ async def _run_pipeline(
             execute=execute,
             total_budget=total_budget,
             total_turns=total_turns,
-            extra_instruction=extra_instruction,
+            extra_instruction=downstream_instruction,
             on_text=on_text,
             stream=stream,
         )

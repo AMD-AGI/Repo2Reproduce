@@ -69,11 +69,12 @@ AMD_RULES: list[str] = [
     "(&/nohup/run_in_background) in one docker_run and poll in another - the first "
     "container exits and kills training, and polls run in empty new containers forever. "
     "Run train+eval SYNCHRONOUSLY in ONE foreground docker_run, passing a large `timeout` "
-    "sized to the FULL protocol (set R2R_DOCKER_RUN_TIMEOUT on the host to raise the "
-    "ceiling, e.g. 6-12h). Reproduce the paper's FULL configuration (full dataset, all "
-    "epochs, full eval) so the result is comparable; on a single GPU match the paper's "
-    "effective batch via gradient accumulation. Reduce workload only as a documented LAST "
-    "RESORT when the full run truly cannot fit, and state the reduction explicitly.",
+    "sized to the full workload for the selected result (set R2R_DOCKER_RUN_TIMEOUT on the "
+    "host to raise the ceiling, e.g. 6-12h). Preserve that result's full dataset and split, "
+    "prescribed epochs, steps, seeds, sequence lengths, and evaluation workload; on a single "
+    "GPU match the paper's effective batch via gradient accumulation. Reduce workload only "
+    "as a documented LAST RESORT when the full run truly cannot fit, and state the reduction "
+    "explicitly.",
 ]
 
 

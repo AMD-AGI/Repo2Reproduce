@@ -1,8 +1,46 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from repo2reproduce.reviewers import run_final_review, run_preflight_review
+
+
+PROMPTS = Path(__file__).parents[1] / "repo2reproduce" / "prompts"
+
+
+def test_selected_result_prompts_have_no_multi_arm_requirements():
+    prompt_names = [
+        "preflight_verifier.md",
+        "executor.md",
+        "final_verifier.md",
+    ]
+    prompts = {
+        name: " ".join((PROMPTS / name).read_text(encoding="utf-8").lower().split())
+        for name in prompt_names
+    }
+
+    prohibited = [
+        "comparison arm",
+        "comparative claim",
+        "required experiment and comparisons",
+        "all required conditions",
+        "cheap baseline",
+        "second condition",
+    ]
+    for name, prompt in prompts.items():
+        for phrase in prohibited:
+            assert phrase not in prompt, f"{phrase!r} remains in {name}"
+
+    executor = prompts["executor.md"]
+    assert "single result in output 1" in executor
+    assert "full dataset and split" in executor
+    assert "epochs and steps" in executor
+    assert "sequence lengths" in executor
+    assert "complete evaluation coverage" in executor
+
+    final_verifier = prompts["final_verifier.md"]
+    assert "full selected-result workload" in final_verifier
 
 
 def test_preflight_review_writes_markdown(tmp_path):

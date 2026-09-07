@@ -97,8 +97,8 @@ def reproduce_cmd(
         False,
         "--allow-scope-reduction",
         help=(
-            "Explicitly allow reduced samples/epochs/seeds when the full paper "
-            "protocol cannot run. Reduced results remain non-comparable."
+            "Explicitly allow reduced samples/epochs/steps/seeds when the full workload "
+            "for the selected result cannot run. Reduced results remain non-comparable."
         ),
     ),
 ):
