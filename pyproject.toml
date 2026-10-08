@@ -27,13 +27,14 @@ dev = ["pytest>=8.0", "ruff>=0.5"]
 
 [project.scripts]
 r2r = "repo2reproduce.cli:app"
+claude-baseline-two-stage = "claude_baseline_two_stage.runner:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatchling.build.targets.wheel]
-packages = ["repo2reproduce"]
+packages = ["repo2reproduce", "claude_baseline_two_stage"]
 
 [tool.ruff]
 line-length = 100

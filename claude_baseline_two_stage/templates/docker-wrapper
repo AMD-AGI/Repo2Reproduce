@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${RUN_DIR:?RUN_DIR is required}"
+: "${RUN_ID:?RUN_ID is required}"
+: "${ASSIGNED_GPU:?ASSIGNED_GPU is required}"
+
+REAL_DOCKER=/usr/bin/docker
+LOG_DIR="${RUN_DIR}/logs"
+mkdir -p "${LOG_DIR}"
+
+python3 - "${LOG_DIR}/docker_commands.jsonl" "$@" <<'PY'
+import datetime
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+event = {
+    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "argv": ["docker", *sys.argv[2:]],
+}
+with path.open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(event) + "\n")
+PY
+
+if [[ $# -eq 0 ]]; then
+    exec "${REAL_DOCKER}"
+fi
+
+subcommand=$1
+shift
+
+case "${subcommand}" in
+    rm|rmi|prune|compose)
+        echo "Blocked for benchmark auditability: docker ${subcommand}" >&2
+        exit 2
+        ;;
+    system|container|image)
+        if [[ "${1:-}" == "prune" || "${1:-}" == "rm" ]]; then
+            echo "Blocked for benchmark auditability: docker ${subcommand} ${1}" >&2
+            exit 2
+        fi
+        ;;
+esac
+
+for arg in "$@"; do
+    case "${arg}" in
+        --rm|--privileged|-v|-v*|--volume|--volume=*|--mount|--mount=*|--device|--device=*|--gpus|--gpus=*)
+            echo "Blocked Docker option; GPU and mounts are controlled by the benchmark: ${arg}" >&2
+            exit 2
+            ;;
+        *ROCR_VISIBLE_DEVICES*|*HIP_VISIBLE_DEVICES*)
+            echo "Blocked GPU visibility override: ${arg}" >&2
+            exit 2
+            ;;
+        /home/*|/shared_nfs/*)
+            if [[ "${arg}" != "${RUN_DIR}"* ]]; then
+                echo "Blocked path outside this run directory: ${arg}" >&2
+                exit 2
+            fi
+            ;;
+    esac
+done
+
+if [[ "${subcommand}" == "run" ]]; then
+    mkdir -p \
+        "${RUN_DIR}/cache/huggingface/datasets" \
+        "${RUN_DIR}/cache/huggingface/transformers" \
+        "${RUN_DIR}/cache/torch" \
+        "${RUN_DIR}/cache/xdg" \
+        "${RUN_DIR}/cache/pip" \
+        "${RUN_DIR}/cache/wandb"
+    exec "${REAL_DOCKER}" run \
+        --device=/dev/kfd \
+        --device=/dev/dri \
+        --group-add video \
+        --security-opt seccomp=unconfined \
+        --ipc=host \
+        -e "ROCR_VISIBLE_DEVICES=${ASSIGNED_GPU}" \
+        -e "HIP_VISIBLE_DEVICES=0" \
+        -e "RUN_DIR=/run" \
+        -e "HF_HOME=/run/cache/huggingface" \
+        -e "HF_DATASETS_CACHE=/run/cache/huggingface/datasets" \
+        -e "TRANSFORMERS_CACHE=/run/cache/huggingface/transformers" \
+        -e "TORCH_HOME=/run/cache/torch" \
+        -e "XDG_CACHE_HOME=/run/cache/xdg" \
+        -e "PIP_CACHE_DIR=/run/cache/pip" \
+        -e "WANDB_DIR=/run/cache/wandb" \
+        -v "${RUN_DIR}:/run" \
+        --label "claude_repro_run=${RUN_ID}" \
+        "$@"
+fi
+
+if [[ "${subcommand}" == "build" ]]; then
+    exec "${REAL_DOCKER}" build \
+        --label "claude_repro_run=${RUN_ID}" \
+        "$@"
+fi
+
+if [[ "${subcommand}" == "buildx" && "${1:-}" == "build" ]]; then
+    shift
+    exec "${REAL_DOCKER}" buildx build \
+        --label "claude_repro_run=${RUN_ID}" \
+        "$@"
+fi
+
+exec "${REAL_DOCKER}" "${subcommand}" "$@"

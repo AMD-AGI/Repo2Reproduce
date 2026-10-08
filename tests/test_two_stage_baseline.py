@@ -1,0 +1,285 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+from claude_agent_sdk import ResultMessage
+from pydantic import ValidationError
+
+from claude_baseline_two_stage import runner
+from claude_baseline_two_stage.executor import execute_manifest
+from claude_baseline_two_stage.runner import initialize_run
+from claude_baseline_two_stage.schemas import ExecutionManifest
+
+
+def _manifest(script: Path, **updates: object) -> ExecutionManifest:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "status": "ready",
+        "selected_experiment": "tiny evaluation",
+        "image_tag": "example/reproduction:test",
+        "launch_script": "execution/launch.sh",
+        "launch_script_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
+        "host_repository": "repo",
+        "container_repository": "/run/workspace/repo",
+        "timeout_seconds": 10,
+        "expected_outputs": ["full-run/metrics.json"],
+        "smoke_test": {
+            "exit_code": 0,
+            "log_path": "smoke/smoke.log",
+            "description": "one-batch pilot",
+        },
+    }
+    payload.update(updates)
+    return ExecutionManifest.model_validate(payload)
+
+
+def _prepared_run(tmp_path: Path, *, create_output: bool = True) -> tuple[Path, Path]:
+    run_dir = tmp_path / "run-1"
+    script = run_dir / "workspace" / "execution" / "launch.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "REPO_DIR=/run/workspace/repo\n"
+        'cd "${REPO_DIR}"\n'
+        "mkdir -p /run/artifacts/full-run\n"
+        "python train.py \\\n"
+        "  --epochs 1 \\\n"
+        "  --batch-size 2 | tee /run/artifacts/full-run/stdout.log\n",
+        encoding="utf-8",
+    )
+    (run_dir / "workspace" / "repo").mkdir()
+    smoke = run_dir / "artifacts" / "smoke" / "smoke.log"
+    smoke.parent.mkdir(parents=True)
+    smoke.write_text("smoke passed\n", encoding="utf-8")
+
+    wrapper = run_dir / "bin" / "docker"
+    wrapper.parent.mkdir()
+    output_statement = (
+        'mkdir -p "$RUN_DIR/artifacts/full-run"\n'
+        'printf \'{"score": 1}\\n\' > "$RUN_DIR/artifacts/full-run/metrics.json"\n'
+        if create_output
+        else ""
+    )
+    wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "%s\\n" "$@" > "$RUN_DIR/logs/fake-docker-argv.txt"\n'
+        f"{output_statement}",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    return run_dir, script
+
+
+def test_ready_manifest_requires_successful_smoke_test(tmp_path: Path) -> None:
+    _, script = _prepared_run(tmp_path)
+    with pytest.raises(ValidationError, match="successful smoke test"):
+        _manifest(
+            script,
+            smoke_test={
+                "exit_code": 1,
+                "log_path": "smoke/smoke.log",
+                "description": "failed",
+            },
+        )
+
+
+def test_blocked_manifest_requires_reason() -> None:
+    manifest = ExecutionManifest.model_validate(
+        {
+            "status": "blocked",
+            "selected_experiment": "tiny evaluation",
+            "blocked_reason": "dataset is unavailable",
+        }
+    )
+    assert manifest.status == "blocked"
+
+    with pytest.raises(ValidationError, match="blocked_reason"):
+        ExecutionManifest.model_validate(
+            {"status": "blocked", "selected_experiment": "tiny evaluation"}
+        )
+
+
+def test_manifest_rejects_unsafe_relative_paths(tmp_path: Path) -> None:
+    _, script = _prepared_run(tmp_path)
+    with pytest.raises(ValidationError, match="relative path"):
+        _manifest(script, launch_script="../launch.sh")
+
+
+def test_initialize_run_installs_isolation_files(tmp_path: Path) -> None:
+    run_dir = tmp_path / "initialized"
+    prompt = initialize_run(
+        run_dir,
+        run_id="initialized",
+        paper_url="https://arxiv.org/abs/0000.00000",
+        repo_url="https://github.com/example/project",
+        assigned_gpu="2",
+        timeout_seconds=120,
+        target=None,
+    )
+
+    assert (run_dir / "bin" / "docker").stat().st_mode & 0o111
+    settings = json.loads(
+        (run_dir / "workspace" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    hook_command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert str(run_dir / "workspace" / ".claude" / "hooks" / "enforce_bash.py") in hook_command
+    assert "https://github.com/example/project" in prompt
+    assert "DO NOT run the complete selected experiment" in prompt
+
+
+def test_project_environment_loads_repository_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: dict[str, Any] = {}
+
+    def fake_load(path: Path, *, override: bool) -> None:
+        observed.update(path=path, override=override)
+
+    monkeypatch.setattr(runner, "load_dotenv", fake_load)
+    runner.load_project_environment()
+
+    assert observed == {"path": runner.PACKAGE_DIR.parent / ".env", "override": False}
+
+
+def test_preparation_reports_sdk_authentication_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+    result = ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=0,
+        is_error=True,
+        num_turns=1,
+        session_id="session-1",
+        stop_reason="stop_sequence",
+        result="Not logged in",
+        structured_output=None,
+        terminal_reason="api_error",
+    )
+
+    async def fake_invoke(**_: Any) -> tuple[ResultMessage, str]:
+        nonlocal calls
+        calls += 1
+        return result, "session-1"
+
+    monkeypatch.setattr(runner, "_invoke_agent", fake_invoke)
+    monkeypatch.setattr(runner, "_base_options", lambda *args, **kwargs: {})
+
+    with pytest.raises(RuntimeError, match=r"failed \(api_error\): Not logged in"):
+        asyncio.run(
+            runner.prepare_manifest(
+                tmp_path,
+                prompt="prepare",
+                assigned_gpu="0",
+                model="model",
+                max_turns=1,
+                max_budget_usd=1,
+            )
+        )
+    assert calls == 1
+
+
+def test_executor_waits_and_records_success(tmp_path: Path) -> None:
+    run_dir, script = _prepared_run(tmp_path)
+    manifest = _manifest(script)
+
+    result = execute_manifest(run_dir, manifest, assigned_gpu="3")
+
+    assert result.status == "succeeded"
+    assert result.exit_code == 0
+    assert result.missing_outputs == []
+    argv = (run_dir / "logs" / "fake-docker-argv.txt").read_text(encoding="utf-8").splitlines()
+    assert argv == [
+        "run",
+        "-w",
+        "/run/workspace/repo",
+        "example/reproduction:test",
+        "bash",
+        "/run/workspace/execution/launch.sh",
+    ]
+
+
+def test_executor_blocks_changed_launch_script(tmp_path: Path) -> None:
+    run_dir, script = _prepared_run(tmp_path)
+    manifest = _manifest(script)
+    script.write_text("#!/bin/bash\nexit 99\n", encoding="utf-8")
+
+    result = execute_manifest(run_dir, manifest, assigned_gpu="0")
+
+    assert result.status == "blocked"
+    assert "hash does not match" in (result.error or "")
+    assert not (run_dir / "logs" / "fake-docker-argv.txt").exists()
+
+
+def test_executor_fails_when_expected_output_is_missing(tmp_path: Path) -> None:
+    run_dir, script = _prepared_run(tmp_path, create_output=False)
+    manifest = _manifest(script)
+
+    result = execute_manifest(run_dir, manifest, assigned_gpu="0")
+
+    assert result.status == "failed"
+    assert result.exit_code == 0
+    assert result.missing_outputs == ["full-run/metrics.json"]
+
+
+def test_recovery_executes_saved_manifest_and_resumes_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir, script = _prepared_run(tmp_path)
+    manifest = _manifest(script)
+    (run_dir / "execution_manifest.json").write_text(
+        manifest.model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    (run_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "session_id": "saved-session",
+                "assigned_physical_gpu": "3",
+                "model": "saved-model",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "execution_result.json").write_text("old blocked result\n", encoding="utf-8")
+    (run_dir / "final_report.md").write_text("old blocked report\n", encoding="utf-8")
+    observed: dict[str, Any] = {}
+
+    async def fake_finalize(_run_dir: Path, **kwargs: Any) -> str:
+        observed.update(kwargs)
+        (run_dir / "final_report.md").write_text("recovered report\n", encoding="utf-8")
+        return "recovered report"
+
+    monkeypatch.setattr(runner, "finalize_session", fake_finalize)
+    args = argparse.Namespace(
+        recover_run=run_dir,
+        gpu=None,
+        model=None,
+        max_turns=10,
+        max_budget_usd=2.0,
+    )
+
+    exit_code = asyncio.run(runner.recover_existing_run(args))
+
+    assert exit_code == 0
+    assert observed["session_id"] == "saved-session"
+    assert observed["assigned_gpu"] == "3"
+    assert observed["model"] == "saved-model"
+    assert (run_dir / "execution_result.pre-recovery.json").read_text(
+        encoding="utf-8"
+    ) == "old blocked result\n"
+    assert (run_dir / "final_report.pre-recovery.md").read_text(
+        encoding="utf-8"
+    ) == "old blocked report\n"
+    metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["status"] == "completed"
+    assert metadata["execution_status"] == "succeeded"
+    assert metadata["recovered"] is True
