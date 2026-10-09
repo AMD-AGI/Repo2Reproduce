@@ -1,41 +1,66 @@
 # How to run the staged Claude agent
 
-For CoMRes, the host-bootstrap launcher verifies Python, Java, Docker/ROCm and provider
-configuration, installs Claude Code when missing, creates or updates `.venv`, installs this
-project, and starts the staged run:
+## Prepare the agent environment
+
+The host needs Python 3.10–3.13, Git, curl, Java 11+, Docker, and a working ROCm driver.
+Verify the GPU and container runtime:
 
 ```bash
-GPU_INDEX=0 ./claude_baseline_two_stage/launch_comres.sh
+java -version
+docker info
+test -e /dev/kfd
+test -d /dev/dri
 ```
 
-Useful overrides:
+Install the Claude Code engine if it is not already available:
 
 ```bash
-# Build, audit and smoke-test, but do not run the full experiment.
-GPU_INDEX=0 PREPARE_ONLY=1 ./claude_baseline_two_stage/launch_comres.sh
-
-# Keep the process attached to the terminal.
-GPU_INDEX=0 FOREGROUND=1 ./claude_baseline_two_stage/launch_comres.sh
+curl -fsSL https://claude.ai/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+claude --version
 ```
 
-Run this command directly from the allocated compute node:
+Create the Python environment and install Repo2Reproduce with the staged agent and paper
+reader dependencies:
 
 ```bash
 cd /home/machaita/Repo2Reproduce
-mkdir -p logs/two-stage-launches
-
-nohup setsid .venv/bin/python -m claude_baseline_two_stage \
-  https://arxiv.org/abs/2412.20292 \
-  https://github.com/Kambm/convolutional_diffusion \
-  --run-id convolutional-diffusion-100sample-r-20261008 \
-  --gpu 2 \
-  --target "Reproduce the 100-sample MNIST ResNet ELS comparison and report the median pixelwise Pearson correlation r." \
-  > logs/two-stage-launches/convolutional-diffusion-100sample-r.log 2>&1 < /dev/null &
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e .
 ```
 
-Replace `--gpu 2` with an available physical GPU index. The command runs in the
-background and writes its launcher output to
-`logs/two-stage-launches/convolutional-diffusion-100sample-r.log`.
+Configure the LLM provider and Java location:
+
+```bash
+test -f .env || cp .env.example .env
+```
+
+Edit `.env` and set the provider credentials, models, and `R2R_JAVA_HOME`. Do not commit
+`.env`.
+
+## Example: launch CoMRes
+
+Run directly from the allocated compute node:
+
+```bash
+cd /home/machaita/Repo2Reproduce
+export PATH="$HOME/.local/bin:$PATH"
+mkdir -p logs/two-stage-launches
+
+RUN_ID="staged-comres-$(date -u +%Y%m%d-%H%M%S)"
+nohup setsid .venv/bin/python -m claude_baseline_two_stage \
+  "https://openreview.net/pdf?id=bRa4JLPzii" \
+  "https://github.com/yjucho1/CoMRes" \
+  --run-id "$RUN_ID" \
+  --gpu 0 \
+  --timeout-seconds 14400 \
+  --target "Reproduce the five-seed ETTh1 L=96 H=96 CoMRes interpolation ensemble-MSE using seeds 22, 99, 123, 456, and 999; produce the five-seed mean and standard deviation; do not reduce the experiment to one seed." \
+  > "logs/two-stage-launches/${RUN_ID}.log" 2>&1 < /dev/null &
+```
+
+Replace `--gpu 0` with the allocated physical GPU index. Add `--prepare-only` to stop
+after the environment build, audit, smoke test, and immutable manifest creation.
 
 To launch from another node, wrap the same command with:
 
