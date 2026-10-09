@@ -19,7 +19,8 @@ from pydantic import ValidationError
 
 from repo2reproduce.provider import ensure_runtime_path, provider_env
 
-from .schemas import ExecutionManifest, ExecutionResult
+from .schemas import ExecutionManifest, ExecutionResult, FinalReport, TargetContract
+from .validators import validate_final_report
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_RUNS_ROOT = Path("/shared_nfs/machita/claude-code-two-stage-runs")
@@ -337,6 +338,10 @@ async def finalize_session(
     options_data.update(
         {
             "allowed_tools": FINALIZATION_TOOLS,
+            "output_format": {
+                "type": "json_schema",
+                "schema": FinalReport.model_json_schema(),
+            },
         }
     )
     result, _ = await _invoke_agent(
@@ -348,11 +353,40 @@ async def finalize_session(
     if result.is_error:
         detail = result.result or ", ".join(result.errors or []) or "unknown SDK error"
         raise RuntimeError(f"finalization failed: {detail}")
-    report = result.result or ""
-    if not report.strip():
-        raise RuntimeError("finalization returned an empty report")
-    (run_dir / "final_report.md").write_text(report, encoding="utf-8")
-    return report
+    if result.subtype != "success" or result.structured_output is None:
+        raise RuntimeError("finalization returned no structured report")
+    report = FinalReport.model_validate(result.structured_output)
+    target = TargetContract.model_validate_json(
+        (run_dir / "target.json").read_text(encoding="utf-8")
+    )
+    validate_final_report(target, execution_result, report)
+    _atomic_json(run_dir / "final_report.json", report.model_dump(mode="json"))
+
+    match = "not determined" if report.match is None else ("yes" if report.match else "no")
+    markdown = "\n".join(
+        [
+            f"# Reproduction report: {report.selected_experiment}",
+            "",
+            f"- **Execution:** {report.execution_status}",
+            f"- **Metric:** {report.metric_name}",
+            f"- **Paper target:** {report.paper_target_value}",
+            f"- **Achieved:** {report.achieved_value or 'not produced'}",
+            f"- **Comparable:** {'yes' if report.comparable else 'no'}",
+            f"- **Match:** {match}",
+            "",
+            "## Comparison",
+            report.comparison_explanation,
+            "",
+            "## Assumptions",
+            *([f"- {item}" for item in report.assumptions] or ["- None reported."]),
+            "",
+            "## Gaps",
+            *([f"- {item}" for item in report.gaps] or ["- None reported."]),
+            "",
+        ]
+    )
+    (run_dir / "final_report.md").write_text(markdown, encoding="utf-8")
+    return markdown
 
 
 def _update_metadata(run_dir: Path, **updates: Any) -> None:

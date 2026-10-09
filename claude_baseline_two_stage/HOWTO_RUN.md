@@ -33,6 +33,7 @@ The orchestrator persists these audit artifacts before full execution:
 - `environment_manifest.json`
 - `execution_manifest.json`
 - `execution_result.json`
+- `final_report.json`
 - `final_report.md`
 
 To resume from the first incomplete stage:

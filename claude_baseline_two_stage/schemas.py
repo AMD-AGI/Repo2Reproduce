@@ -480,3 +480,30 @@ class ExecutionResult(BaseModel):
     achieved_metric: str | None = None
     metric_source: str | None = None
     metric_extraction_error: str | None = None
+
+
+class FinalReport(BaseModel):
+    """Evidence-only final conclusion produced from frozen artifacts."""
+
+    schema_version: Literal[2] = 2
+    selected_experiment: str
+    execution_status: Literal["succeeded", "failed", "timed_out", "blocked"]
+    metric_name: str
+    paper_target_value: str
+    achieved_value: str | None = None
+    comparable: bool
+    match: bool | None = None
+    comparison_explanation: str
+    assumptions: list[str] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_conclusion(self) -> FinalReport:
+        if not self.comparable and self.match is not None:
+            raise ValueError("an incomparable result cannot have a match verdict")
+        if self.execution_status != "succeeded":
+            if self.comparable:
+                raise ValueError("an unsuccessful execution cannot be declared comparable")
+            if self.match is not None:
+                raise ValueError("an unsuccessful execution cannot have a match verdict")
+        return self

@@ -15,7 +15,9 @@ from .schemas import (
     ConfigurationAudit,
     EnvironmentManifest,
     ExecutionManifest,
+    ExecutionResult,
     ExecutionSpec,
+    FinalReport,
     PaperEvidence,
     TargetContract,
 )
@@ -280,5 +282,31 @@ def validate_preparation(
             "manifest scientific configuration references unknown audit items: "
             + ", ".join(unknown_inputs)
         )
+    if errors:
+        raise StageValidationError("; ".join(errors))
+
+
+def validate_final_report(
+    target: TargetContract,
+    result: ExecutionResult,
+    report: FinalReport,
+) -> None:
+    """Prevent finalization from substituting targets or unsupported result values."""
+
+    errors: list[str] = []
+    if report.selected_experiment != target.selected_experiment:
+        errors.append("final report selected experiment differs from target")
+    if report.metric_name != target.metric_name:
+        errors.append("final report metric differs from target")
+    if report.paper_target_value != target.metric_value:
+        errors.append("final report paper value differs from target")
+    if report.execution_status != result.status:
+        errors.append("final report execution status differs from execution result")
+    if report.achieved_value != result.achieved_metric:
+        errors.append("final report achieved value differs from deterministic extraction")
+    if (result.status != "succeeded" or result.achieved_metric is None) and (
+        report.comparable or report.match is not None
+    ):
+        errors.append("final report claims comparability without a successful extracted metric")
     if errors:
         raise StageValidationError("; ".join(errors))

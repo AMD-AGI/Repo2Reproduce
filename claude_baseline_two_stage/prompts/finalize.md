@@ -23,3 +23,7 @@ final reproduction status:
 
 Do not launch or repeat the experiment. Base the final status only on the persisted manifest,
 execution result, log, repository, and output artifacts.
+
+The selected experiment, metric name, paper target, execution status, and achieved value must
+exactly match the frozen target and deterministic execution result. Return only the structured
+FinalReport requested by the output schema.

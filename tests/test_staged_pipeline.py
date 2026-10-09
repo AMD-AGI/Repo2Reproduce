@@ -21,6 +21,7 @@ from claude_baseline_two_stage.schemas import (
     ExecutionPathStep,
     ExecutionResult,
     ExecutionSpec,
+    FinalReport,
     PaperEvidence,
     ResolvedInput,
     ScientificRequirement,
@@ -30,6 +31,7 @@ from claude_baseline_two_stage.validators import (
     StageValidationError,
     sha256_file,
     validate_audit,
+    validate_final_report,
     validate_preparation,
     validate_target,
 )
@@ -524,3 +526,36 @@ def test_recovery_rerun_always_regenerates_stale_report(
     assert (run_dir / "final_report.pre-recovery.md").read_text(
         encoding="utf-8"
     ) == "stale report\n"
+
+
+def test_final_report_cannot_substitute_achieved_value(tmp_path: Path) -> None:
+    _paper(tmp_path)
+    target = _target(tmp_path)
+    result = ExecutionResult(
+        status="succeeded",
+        command=["python", "run.py"],
+        exit_code=0,
+        timed_out=False,
+        duration_seconds=1,
+        log_path="executor.log",
+        expected_outputs=["full-run/metrics.json"],
+        missing_outputs=[],
+        achieved_metric="0.91",
+        metric_source="full-run/metrics.json",
+    )
+    report = FinalReport(
+        selected_experiment=target.selected_experiment,
+        execution_status="succeeded",
+        metric_name=target.metric_name,
+        paper_target_value=target.metric_value,
+        achieved_value="0.99",
+        comparable=True,
+        match=True,
+        comparison_explanation="Incorrect substituted value.",
+    )
+
+    with pytest.raises(
+        StageValidationError,
+        match="achieved value differs from deterministic extraction",
+    ):
+        validate_final_report(target, result, report)
