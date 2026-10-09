@@ -1,4 +1,4 @@
-"""Claude Agent SDK orchestration for the two-stage reproduction baseline."""
+"""Claude Agent SDK entry point for the staged reproduction pipeline."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import dataclasses
 import json
 import os
 import shutil
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,9 +17,8 @@ from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, SystemMessage, q
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
-from repo2reproduce.provider import ensure_runtime_path, provider_env, reasoning_model
+from repo2reproduce.provider import ensure_runtime_path, provider_env
 
-from .executor import execute_manifest
 from .schemas import ExecutionManifest, ExecutionResult
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -104,10 +102,13 @@ def initialize_run(
     for path in (
         workspace,
         hook_dir,
+        run_dir / "paper",
         run_dir / "bin",
         run_dir / "logs",
         run_dir / "artifacts",
         run_dir / "cache",
+        run_dir / "prompts",
+        run_dir / "stage_attempts",
     ):
         path.mkdir(parents=True, exist_ok=True)
 
@@ -140,20 +141,19 @@ def initialize_run(
         },
     )
     prompt = _render_prompt(
-        "prepare.md",
+        "select_target.md",
         {
-            "PAPER_URL": paper_url,
-            "REPO_URL": repo_url,
-            "WORKSPACE": str(workspace),
-            "TIMEOUT_SECONDS": str(timeout_seconds),
-            "TARGET": target or "(choose the cheapest representative numerical result)",
+            "PAPER_MD": str(run_dir / "paper" / "paper.md"),
+            "PAPER_PARSE": str(run_dir / "paper" / "paper_parse.json"),
+            "REPOSITORY": str(workspace / "repo"),
+            "TARGET": target or "(select one central locally reproducible result)",
         },
     )
     (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     _atomic_json(
         run_dir / "metadata.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": run_id,
             "paper_url": paper_url,
             "repo_url": repo_url,
@@ -164,6 +164,7 @@ def initialize_run(
             "target": target,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "status": "initialized",
+            "stages": {},
         },
     )
     return prompt
@@ -275,9 +276,7 @@ async def prepare_manifest(
         if result.is_error:
             detail = result.result or ", ".join(result.errors or []) or "unknown SDK error"
             terminal_reason = result.terminal_reason or result.stop_reason or "unknown"
-            raise RuntimeError(
-                f"preparation agent failed ({terminal_reason}): {detail}"
-            )
+            raise RuntimeError(f"preparation agent failed ({terminal_reason}): {detail}")
         if result.subtype != "success" or result.structured_output is None:
             validation_error = RuntimeError(
                 f"preparation ended without structured output: {result.subtype}"
@@ -300,16 +299,27 @@ async def prepare_manifest(
 async def finalize_session(
     run_dir: Path,
     *,
-    session_id: str,
+    session_id: str | None,
     assigned_gpu: str,
     model: str,
     max_turns: int,
     max_budget_usd: float,
     execution_result: ExecutionResult,
 ) -> str:
+    """Create a stateless evidence-only report.
+
+    ``session_id`` is accepted for backward API compatibility but deliberately ignored:
+    recovery must not depend on the preparation session still being resumable.
+    """
+
+    del session_id
     prompt = _render_prompt(
         "finalize.md",
         {
+            "TARGET_PATH": str(run_dir / "target.json"),
+            "AUDIT_PATH": str(run_dir / "configuration_audit.json"),
+            "SPEC_PATH": str(run_dir / "execution_spec.json"),
+            "ENVIRONMENT_PATH": str(run_dir / "environment_manifest.json"),
             "MANIFEST_PATH": str(run_dir / "execution_manifest.json"),
             "RESULT_PATH": str(run_dir / "execution_result.json"),
             "LOG_PATH": execution_result.log_path,
@@ -327,7 +337,6 @@ async def finalize_session(
     options_data.update(
         {
             "allowed_tools": FINALIZATION_TOOLS,
-            "resume": session_id,
         }
     )
     result, _ = await _invoke_agent(
@@ -336,7 +345,12 @@ async def finalize_session(
         log_path=run_dir / "logs" / "agent_messages.jsonl",
         stage="finalize",
     )
+    if result.is_error:
+        detail = result.result or ", ".join(result.errors or []) or "unknown SDK error"
+        raise RuntimeError(f"finalization failed: {detail}")
     report = result.result or ""
+    if not report.strip():
+        raise RuntimeError("finalization returned an empty report")
     (run_dir / "final_report.md").write_text(report, encoding="utf-8")
     return report
 
@@ -361,64 +375,26 @@ def _preserve_previous_result(run_dir: Path) -> None:
 
 
 async def recover_existing_run(args: argparse.Namespace) -> int:
-    """Execute an existing ready manifest and resume its saved Claude session."""
+    """Resume from the first incomplete or invalid durable stage."""
 
     ensure_runtime_path()
     run_dir = args.recover_run.resolve()
     metadata_path = run_dir / "metadata.json"
-    manifest_path = run_dir / "execution_manifest.json"
     if not metadata_path.is_file():
         raise FileNotFoundError(f"recovery metadata is missing: {metadata_path}")
-    if not manifest_path.is_file():
-        raise FileNotFoundError(f"recovery manifest is missing: {manifest_path}")
+    if not (run_dir / "input.json").is_file():
+        raise FileNotFoundError(f"recovery input is missing: {run_dir / 'input.json'}")
 
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    manifest = ExecutionManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
-    if manifest.status != "ready":
-        raise RuntimeError("only a ready execution manifest can be recovered")
-    session_id = metadata.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
-        raise RuntimeError("recovery metadata contains no resumable Claude session ID")
-
-    assigned_gpu = args.gpu or str(metadata.get("assigned_physical_gpu", "0"))
-    model = args.model or str(metadata.get("model") or reasoning_model())
-    _preserve_previous_result(run_dir)
     _update_metadata(
         run_dir,
-        status="recovery_executing",
+        status="recovering",
         recovery_started_at=datetime.now(timezone.utc).isoformat(),
         recovery_error=None,
     )
+    from .pipeline import run_staged_pipeline
 
     try:
-        execution_result = await asyncio.to_thread(
-            execute_manifest,
-            run_dir,
-            manifest,
-            assigned_gpu=assigned_gpu,
-        )
-        _update_metadata(run_dir, status=f"recovery_{execution_result.status}")
-        await finalize_session(
-            run_dir,
-            session_id=session_id,
-            assigned_gpu=assigned_gpu,
-            model=model,
-            max_turns=args.max_turns,
-            max_budget_usd=args.max_budget_usd,
-            execution_result=execution_result,
-        )
-        _update_metadata(
-            run_dir,
-            status="completed",
-            execution_status=execution_result.status,
-            recovered=True,
-            recovery_finished_at=datetime.now(timezone.utc).isoformat(),
-            finished_at=datetime.now(timezone.utc).isoformat(),
-        )
-        print(f"Recovered run directory: {run_dir}")
-        print(f"Execution status: {execution_result.status}")
-        print(f"Final report: {run_dir / 'final_report.md'}")
-        return 0 if execution_result.status == "succeeded" else 1
+        return await run_staged_pipeline(run_dir, args, recovering=True)
     except Exception as exc:
         _update_metadata(
             run_dir,
@@ -434,7 +410,7 @@ async def run(args: argparse.Namespace) -> int:
     assigned_gpu = args.gpu or "0"
     run_id = args.run_id or _default_run_id(args.repo_url)
     run_dir = args.runs_root.resolve() / run_id
-    prompt = initialize_run(
+    initialize_run(
         run_dir,
         run_id=run_id,
         paper_url=args.paper_url,
@@ -443,75 +419,9 @@ async def run(args: argparse.Namespace) -> int:
         timeout_seconds=args.timeout_seconds,
         target=args.target,
     )
-    model = args.model or reasoning_model()
+    from .pipeline import run_staged_pipeline
 
-    try:
-        manifest, session_id = await prepare_manifest(
-            run_dir,
-            prompt=prompt,
-            assigned_gpu=assigned_gpu,
-            model=model,
-            max_turns=args.max_turns,
-            max_budget_usd=args.max_budget_usd,
-        )
-        _atomic_json(
-            run_dir / "execution_manifest.json",
-            manifest.model_dump(mode="json"),
-        )
-        _update_metadata(
-            run_dir,
-            status="prepared",
-            session_id=session_id,
-            model=model,
-            manifest_status=manifest.status,
-        )
-        if manifest.status == "blocked":
-            _update_metadata(
-                run_dir,
-                status="blocked",
-                finished_at=datetime.now(timezone.utc).isoformat(),
-                blocked_reason=manifest.blocked_reason,
-            )
-            print(f"Preparation blocked: {manifest.blocked_reason}", file=sys.stderr)
-            return 2
-        if args.prepare_only:
-            print(f"Prepared manifest: {run_dir / 'execution_manifest.json'}")
-            return 0
-
-        execution_result = await asyncio.to_thread(
-            execute_manifest,
-            run_dir,
-            manifest,
-            assigned_gpu=assigned_gpu,
-        )
-        _update_metadata(run_dir, status=f"execution_{execution_result.status}")
-        await finalize_session(
-            run_dir,
-            session_id=session_id,
-            assigned_gpu=assigned_gpu,
-            model=model,
-            max_turns=args.max_turns,
-            max_budget_usd=args.max_budget_usd,
-            execution_result=execution_result,
-        )
-        _update_metadata(
-            run_dir,
-            status="completed",
-            execution_status=execution_result.status,
-            finished_at=datetime.now(timezone.utc).isoformat(),
-        )
-        print(f"Run directory: {run_dir}")
-        print(f"Execution status: {execution_result.status}")
-        print(f"Final report: {run_dir / 'final_report.md'}")
-        return 0 if execution_result.status == "succeeded" else 1
-    except Exception as exc:
-        _update_metadata(
-            run_dir,
-            status="failed",
-            finished_at=datetime.now(timezone.utc).isoformat(),
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        raise
+    return await run_staged_pipeline(run_dir, args, recovering=False)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -521,7 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--recover-run",
         type=Path,
-        help="Execute an existing manifest and resume its saved Claude session",
+        help="Resume an existing run from its first incomplete durable stage",
     )
     parser.add_argument("--target")
     parser.add_argument("--run-id")

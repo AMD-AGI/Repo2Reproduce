@@ -177,6 +177,48 @@ def validate_manifest_files(run_dir: Path, manifest: ExecutionManifest) -> tuple
     return script, wrapper
 
 
+def _extract_metric(run_dir: Path, manifest: ExecutionManifest) -> tuple[str | None, str | None]:
+    """Extract the achieved value using the frozen machine-readable manifest rule."""
+
+    extractor = manifest.metric_extractor
+    if extractor is None:
+        return None, None
+    source = _inside(run_dir / "artifacts", extractor.source, must_exist=True)
+    raw = source.read_text(encoding="utf-8", errors="replace")
+    if extractor.format == "json":
+        value: object = json.loads(raw)
+        for component in extractor.selector.split("."):
+            if isinstance(value, dict):
+                if component not in value:
+                    raise ManifestExecutionError(
+                        f"metric JSON selector component is missing: {component}"
+                    )
+                value = value[component]
+            elif isinstance(value, list) and component.isdigit():
+                index = int(component)
+                if index >= len(value):
+                    raise ManifestExecutionError(
+                        f"metric JSON selector index is out of range: {component}"
+                    )
+                value = value[index]
+            else:
+                raise ManifestExecutionError(
+                    f"metric JSON selector cannot descend through: {component}"
+                )
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, sort_keys=True), extractor.source
+        return str(value), extractor.source
+
+    match = re.search(extractor.selector, raw, flags=re.MULTILINE)
+    if match is None:
+        raise ManifestExecutionError("metric regex did not match its source artifact")
+    if "value" in match.groupdict():
+        return match.group("value"), extractor.source
+    if match.groups():
+        return match.group(1), extractor.source
+    return match.group(0), extractor.source
+
+
 def execute_manifest(
     run_dir: Path,
     manifest: ExecutionManifest,
@@ -260,23 +302,31 @@ def execute_manifest(
             error = f"{type(exc).__name__}: {exc}"
 
     duration = time.monotonic() - started
-    expected = [
-        _inside(run_dir / "artifacts", relative) for relative in manifest.expected_outputs
-    ]
+    expected = [_inside(run_dir / "artifacts", relative) for relative in manifest.expected_outputs]
     missing = [
         relative
         for relative, path in zip(manifest.expected_outputs, expected, strict=True)
         if not path.exists()
     ]
+    achieved_metric: str | None = None
+    metric_source: str | None = None
+    metric_extraction_error: str | None = None
+    if not timed_out and exit_code == 0 and not missing and manifest.metric_extractor:
+        try:
+            achieved_metric, metric_source = _extract_metric(run_dir, manifest)
+        except (ManifestExecutionError, OSError, ValueError, json.JSONDecodeError) as exc:
+            metric_extraction_error = str(exc)
     if timed_out:
         status = "timed_out"
-    elif exit_code == 0 and not missing:
+    elif exit_code == 0 and not missing and metric_extraction_error is None:
         status = "succeeded"
     else:
         status = "failed"
         if error is None:
             if exit_code != 0:
                 error = f"launch command exited with code {exit_code}"
+            elif metric_extraction_error:
+                error = f"metric extraction failed: {metric_extraction_error}"
             else:
                 error = f"missing expected outputs: {', '.join(missing)}"
 
@@ -290,6 +340,9 @@ def execute_manifest(
         expected_outputs=manifest.expected_outputs,
         missing_outputs=missing,
         error=error,
+        achieved_metric=achieved_metric,
+        metric_source=metric_source,
+        metric_extraction_error=metric_extraction_error,
     )
     _atomic_json(result_path, result.model_dump(mode="json"))
     return result

@@ -131,8 +131,8 @@ def test_initialize_run_installs_isolation_files(tmp_path: Path) -> None:
     )
     hook_command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     assert str(run_dir / "workspace" / ".claude" / "hooks" / "enforce_bash.py") in hook_command
-    assert "https://github.com/example/project" in prompt
-    assert "DO NOT run the complete selected experiment" in prompt
+    assert str(run_dir / "workspace" / "repo") in prompt
+    assert "Read the ENTIRE paper Markdown" in prompt
 
 
 def test_project_environment_loads_repository_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -229,36 +229,40 @@ def test_executor_fails_when_expected_output_is_missing(tmp_path: Path) -> None:
     assert result.missing_outputs == ["full-run/metrics.json"]
 
 
-def test_recovery_executes_saved_manifest_and_resumes_session(
+def test_recovery_delegates_to_staged_pipeline_without_saved_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run_dir, script = _prepared_run(tmp_path)
-    manifest = _manifest(script)
-    (run_dir / "execution_manifest.json").write_text(
-        manifest.model_dump_json(indent=2),
-        encoding="utf-8",
-    )
+    run_dir = tmp_path / "run-1"
+    run_dir.mkdir()
     (run_dir / "metadata.json").write_text(
         json.dumps(
             {
-                "status": "completed",
-                "session_id": "saved-session",
+                "status": "failed",
                 "assigned_physical_gpu": "3",
                 "model": "saved-model",
+                "stages": {},
             }
         ),
         encoding="utf-8",
     )
-    (run_dir / "execution_result.json").write_text("old blocked result\n", encoding="utf-8")
-    (run_dir / "final_report.md").write_text("old blocked report\n", encoding="utf-8")
+    (run_dir / "input.json").write_text(
+        json.dumps(
+            {
+                "paper_url": "https://example.test/paper.pdf",
+                "repo_url": "https://github.com/example/repo",
+                "timeout_seconds": 120,
+                "target": None,
+            }
+        ),
+        encoding="utf-8",
+    )
     observed: dict[str, Any] = {}
 
-    async def fake_finalize(_run_dir: Path, **kwargs: Any) -> str:
-        observed.update(kwargs)
-        (run_dir / "final_report.md").write_text("recovered report\n", encoding="utf-8")
-        return "recovered report"
+    async def fake_pipeline(_run_dir: Path, args: Any, *, recovering: bool) -> int:
+        observed.update(run_dir=_run_dir, args=args, recovering=recovering)
+        return 0
 
-    monkeypatch.setattr(runner, "finalize_session", fake_finalize)
+    monkeypatch.setattr("claude_baseline_two_stage.pipeline.run_staged_pipeline", fake_pipeline)
     args = argparse.Namespace(
         recover_run=run_dir,
         gpu=None,
@@ -270,16 +274,8 @@ def test_recovery_executes_saved_manifest_and_resumes_session(
     exit_code = asyncio.run(runner.recover_existing_run(args))
 
     assert exit_code == 0
-    assert observed["session_id"] == "saved-session"
-    assert observed["assigned_gpu"] == "3"
-    assert observed["model"] == "saved-model"
-    assert (run_dir / "execution_result.pre-recovery.json").read_text(
-        encoding="utf-8"
-    ) == "old blocked result\n"
-    assert (run_dir / "final_report.pre-recovery.md").read_text(
-        encoding="utf-8"
-    ) == "old blocked report\n"
+    assert observed["run_dir"] == run_dir
+    assert observed["recovering"] is True
     metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
-    assert metadata["status"] == "completed"
-    assert metadata["execution_status"] == "succeeded"
-    assert metadata["recovered"] is True
+    assert metadata["status"] == "recovering"
+    assert "session_id" not in metadata

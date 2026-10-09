@@ -1,4 +1,4 @@
-# How to run the Claude two-stage agent
+# How to run the staged Claude agent
 
 Run this command directly from the allocated compute node:
 
@@ -24,3 +24,23 @@ To launch from another node, wrap the same command with:
 ```bash
 spur exec <allocation-id> bash -lc '<command>'
 ```
+
+The orchestrator persists these audit artifacts before full execution:
+
+- `target.json`
+- `configuration_audit.json`
+- `execution_spec.json`
+- `environment_manifest.json`
+- `execution_manifest.json`
+- `execution_result.json`
+- `final_report.md`
+
+To resume from the first incomplete stage:
+
+```bash
+.venv/bin/python -m claude_baseline_two_stage \
+  --recover-run /shared_nfs/machita/claude-code-two-stage-runs/<run-id>
+```
+
+Use `--prepare-only` to stop after the environment is smoke-tested and the immutable
+execution manifest is written.
