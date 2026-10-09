@@ -1,5 +1,23 @@
 # How to run the staged Claude agent
 
+For CoMRes, the host-bootstrap launcher verifies Python, Java, Docker/ROCm and provider
+configuration, installs Claude Code when missing, creates or updates `.venv`, installs this
+project, and starts the staged run:
+
+```bash
+GPU_INDEX=0 ./claude_baseline_two_stage/launch_comres.sh
+```
+
+Useful overrides:
+
+```bash
+# Build, audit and smoke-test, but do not run the full experiment.
+GPU_INDEX=0 PREPARE_ONLY=1 ./claude_baseline_two_stage/launch_comres.sh
+
+# Keep the process attached to the terminal.
+GPU_INDEX=0 FOREGROUND=1 ./claude_baseline_two_stage/launch_comres.sh
+```
+
 Run this command directly from the allocated compute node:
 
 ```bash
