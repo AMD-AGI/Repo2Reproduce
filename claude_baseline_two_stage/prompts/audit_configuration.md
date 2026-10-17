@@ -10,30 +10,43 @@ Repository commit: {{REPOSITORY_COMMIT}}
 
 Do not build an environment or run the experiment.
 
-Find the selected experiment's real entry point. Trace the reproduction execution path
-from that entry point through every computation that produces the reported metric or
-artifact. This path may be training, inference, simulation, optimization, data analysis,
-benchmarking, theorem checking, hardware measurement, or another experiment type.
+Build one canonical scientific-configuration ledger in this order:
 
-Perform both directions of the audit:
+1. Discover all repository entry points and steps needed for this target, including
+   training, validation, analysis, metric calculation, and multi-run aggregation when
+   applicable. Record the selected execution path in order.
+2. Trace that path and inventory every consumed SCIENTIFIC input: dataset and
+   preprocessing, model, optimizer, learning rate, loss, epochs or steps, seeds,
+   checkpoints, thresholds, metrics, aggregation, and relevant hard-coded values.
+3. For each code input, find what the paper states. Preserve separate code defaults and
+   recorded/documented experiment values. Attach verbatim paper evidence when a paper
+   value exists and exact repository-relative code evidence.
+4. Iterate every requirement in target.json and map its id into the same ledger through
+   requirement_ids. Add an item when no existing item represents it.
 
-1. Code to paper: inventory every scientific input consumed along the execution path.
-   Include CLI arguments, config values, defaults, hard-coded constants, datasets,
-   preprocessing, models, checkpoints, seeds, sample counts, thresholds, metric settings,
-   repetitions, and aggregation. For each input, find the paper value and a verbatim
-   quotation. When the paper does not state it, mark it code_only_assumption.
-2. Paper to code: map every requirement in target.json to the exact code that consumes it
-   and record the runtime value. If a paper detail is not implemented, record
-   paper_detail_not_implemented.
+Use exactly one configuration array; do not produce separate paper-to-code and
+code-to-paper arrays. Keep each item atomic: for example, optimizer name and learning rate
+are separate items when they are separate executable inputs.
 
-For a conflict, resolve to the paper value only if the code can consume that value.
-Otherwise mark the audit blocked and describe the minimal scientific patch that would be
-required. Do not silently prefer a code default.
+Choose the author-reported paper value whenever the implementation can accept it. Use only
+these findings:
 
-Code evidence paths must be relative to the repository and include short exact snippets.
-Set both completeness declarations true only after every discovered code input and every
-target requirement is represented. The execution specification must contain every
-resolved code-to-paper audit item exactly once, a repository-relative result artifact, and
-enough command detail for the environment stage to create the final launch script.
+- match: paper and experiment code agree;
+- paper_preferred: paper differs from a default/documented value and the paper value is
+  selected;
+- paper_missing: the code consumes an input the paper does not state; select the
+  experiment-code value as the explicit fallback;
+- paper_partially_implemented: some, but not all, of the paper requirement is implemented;
+- paper_not_implemented: the paper requirement has no implementation.
+
+Scientific discrepancies never block this stage. Record them for the final report.
+Do not inspect or report dependency installation, Docker/ROCm/Python versions,
+common_utils, .sweep markers, filesystem mounts, package availability, or any other
+environment concern; those belong exclusively to environment preparation.
+
+Set repository_path to {{REPOSITORY_RELATIVE}} and repository_commit to
+{{REPOSITORY_COMMIT}}. Code evidence paths are relative to that repository and include
+short exact snippets. Return only AuditStageOutput with its single `audit` object. Do not
+create an execution specification or command in this stage.
 
 Return only the structured AuditStageOutput requested by the output schema.

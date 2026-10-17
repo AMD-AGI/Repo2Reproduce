@@ -23,15 +23,15 @@ def _manifest(script: Path, **updates: object) -> ExecutionManifest:
         "status": "ready",
         "selected_experiment": "tiny evaluation",
         "image_tag": "example/reproduction:test",
-        "launch_script": "execution/launch.sh",
+        "launch_script": "workspace/execution/launch.sh",
         "launch_script_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
-        "host_repository": "repo",
+        "host_repository": "workspace/repo",
         "container_repository": "/run/workspace/repo",
         "timeout_seconds": 10,
-        "expected_outputs": ["full-run/metrics.json"],
+        "expected_outputs": ["artifacts/full-run/metrics.json"],
         "smoke_test": {
             "exit_code": 0,
-            "log_path": "smoke/smoke.log",
+            "log_path": "artifacts/smoke/smoke.log",
             "description": "one-batch pilot",
         },
     }
@@ -85,7 +85,7 @@ def test_ready_manifest_requires_successful_smoke_test(tmp_path: Path) -> None:
             script,
             smoke_test={
                 "exit_code": 1,
-                "log_path": "smoke/smoke.log",
+                "log_path": "artifacts/smoke/smoke.log",
                 "description": "failed",
             },
         )
@@ -131,7 +131,7 @@ def test_initialize_run_installs_isolation_files(tmp_path: Path) -> None:
     )
     hook_command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     assert str(run_dir / "workspace" / ".claude" / "hooks" / "enforce_bash.py") in hook_command
-    assert str(run_dir / "workspace" / "repo") in prompt
+    assert str(run_dir / "workspace" / "repo") not in prompt
     assert "Read the ENTIRE paper Markdown" in prompt
 
 
@@ -226,7 +226,7 @@ def test_executor_fails_when_expected_output_is_missing(tmp_path: Path) -> None:
 
     assert result.status == "failed"
     assert result.exit_code == 0
-    assert result.missing_outputs == ["full-run/metrics.json"]
+    assert result.missing_outputs == ["artifacts/full-run/metrics.json"]
 
 
 def test_recovery_delegates_to_staged_pipeline_without_saved_session(

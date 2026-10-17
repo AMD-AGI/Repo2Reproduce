@@ -72,7 +72,6 @@ The orchestrator persists these audit artifacts before full execution:
 
 - `target.json`
 - `configuration_audit.json`
-- `execution_spec.json`
 - `environment_manifest.json`
 - `execution_manifest.json`
 - `execution_result.json`

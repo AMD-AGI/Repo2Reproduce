@@ -8,22 +8,21 @@ import shutil
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from claude_baseline_two_stage import pipeline, runner
 from claude_baseline_two_stage.executor import _extract_metric
 from claude_baseline_two_stage.schemas import (
-    AuditItem,
     CodeEvidence,
     ConfigurationAudit,
     EnvironmentManifest,
     ExecutionManifest,
     ExecutionPathStep,
     ExecutionResult,
-    ExecutionSpec,
     FinalReport,
     PaperEvidence,
+    PreparationStageOutput,
     ResolvedInput,
+    ScientificConfigurationItem,
     ScientificRequirement,
     TargetContract,
 )
@@ -104,79 +103,45 @@ def _code_ref(snippet: str) -> CodeEvidence:
     return CodeEvidence(path="run.py", locator="run", snippet=snippet)
 
 
-def _audit_and_spec(
+def _audit(
     run_dir: Path,
     target: TargetContract,
     *,
     omit_metric_requirement: bool = False,
-) -> tuple[ConfigurationAudit, ExecutionSpec]:
+) -> ConfigurationAudit:
     target_hash = sha256_file(run_dir / "target.json")
-    dataset_match = AuditItem(
-        id="code-dataset",
-        direction="code_to_paper",
+    dataset_match = ScientificConfigurationItem(
+        id="dataset",
         category="dataset",
         name="dataset",
-        status="match",
-        code_value="DemoSet test split",
         paper_value="DemoSet test split",
-        resolved_value="DemoSet test split",
         paper_evidence=_evidence(DATASET_QUOTE),
+        code_experiment_value="DemoSet test split",
         code_evidence=_code_ref('DATASET = "DemoSet"'),
         consumed_by=_code_ref("def run"),
-        resolution="paper and code agree",
+        chosen_value="DemoSet test split",
+        requirement_ids=["dataset"],
+        finding="match",
+        notes="paper and code agree",
     )
-    metric_match = AuditItem(
-        id="code-metric",
-        direction="code_to_paper",
+    metric_match = ScientificConfigurationItem(
+        id="metric",
         category="metric",
         name="metric",
-        status="match",
-        code_value="median accuracy",
         paper_value="median accuracy",
-        resolved_value="median accuracy",
         paper_evidence=_evidence(METRIC_QUOTE),
+        code_experiment_value="median accuracy",
         code_evidence=_code_ref("median_accuracy"),
         consumed_by=_code_ref("def run"),
-        resolution="paper and code agree",
+        chosen_value="median accuracy",
+        requirement_ids=[] if omit_metric_requirement else ["metric"],
+        finding="match",
+        notes="mapped to final aggregation",
     )
-    paper_to_code = [
-        AuditItem(
-            id="paper-dataset",
-            direction="paper_to_code",
-            requirement_id="dataset",
-            category="dataset",
-            name="evaluation dataset",
-            status="match",
-            code_value="DemoSet test split",
-            paper_value="DemoSet test split",
-            resolved_value="DemoSet test split",
-            paper_evidence=_evidence(DATASET_QUOTE),
-            code_evidence=_code_ref('DATASET = "DemoSet"'),
-            consumed_by=_code_ref("def run"),
-            resolution="mapped to the executed loader",
-        )
-    ]
-    if not omit_metric_requirement:
-        paper_to_code.append(
-            AuditItem(
-                id="paper-metric",
-                direction="paper_to_code",
-                requirement_id="metric",
-                category="metric",
-                name="reported metric",
-                status="match",
-                code_value="median accuracy",
-                paper_value="median accuracy",
-                resolved_value="median accuracy",
-                paper_evidence=_evidence(METRIC_QUOTE),
-                code_evidence=_code_ref("median_accuracy"),
-                consumed_by=_code_ref("def run"),
-                resolution="mapped to final aggregation",
-            )
-        )
     audit = ConfigurationAudit(
-        status="ready",
         target_sha256=target_hash,
+        repository_path="repo",
+        repository_commit="abc123",
         experiment_kind="evaluation",
         entry_points=[_code_ref("def run")],
         execution_path=[
@@ -188,38 +153,27 @@ def _audit_and_spec(
                 outputs=["median accuracy"],
             )
         ],
-        code_to_paper=[dataset_match, metric_match],
-        paper_to_code=paper_to_code,
-        code_to_paper_complete=True,
-        paper_to_code_complete=True,
+        configuration=[dataset_match, metric_match],
     )
-    spec = ExecutionSpec(
-        status="ready",
-        target_sha256=target_hash,
-        repository_path="repo",
-        repository_commit="abc123",
-        experiment_kind="evaluation",
-        entrypoint=_code_ref("def run"),
-        command_outline="python run.py --dataset DemoSet",
-        resolved_inputs=[
-            ResolvedInput(
-                audit_item_id="code-dataset",
-                name="dataset",
-                value="DemoSet test split",
-                delivery="cli",
-                rendered="--dataset DemoSet",
-            ),
-            ResolvedInput(
-                audit_item_id="code-metric",
-                name="metric",
-                value="median accuracy",
-                delivery="hardcoded",
-            ),
-        ],
-        result_artifact="full-run/metrics.json",
-        metric_extraction="Read median_accuracy from metrics.json",
-    )
-    return audit, spec
+    return audit
+
+
+def _resolved_inputs() -> list[ResolvedInput]:
+    return [
+        ResolvedInput(
+            audit_item_id="dataset",
+            name="dataset",
+            value="DemoSet test split",
+            delivery="cli",
+            rendered="--dataset DemoSet",
+        ),
+        ResolvedInput(
+            audit_item_id="metric",
+            name="metric",
+            value="median accuracy",
+            delivery="hardcoded",
+        ),
+    ]
 
 
 def _repository(run_dir: Path) -> None:
@@ -243,82 +197,85 @@ def test_target_quotes_are_verified_and_located(tmp_path: Path) -> None:
     assert target.requirements[0].evidence.locator == "p.1, paragraph"
 
 
-def test_bidirectional_audit_requires_every_target_requirement(tmp_path: Path) -> None:
+def test_target_can_skip_quote_checks_for_command_preview(tmp_path: Path) -> None:
+    _paper(tmp_path)
+    target = _target(tmp_path)
+    target.requirements[0].evidence.quote = "unverified diagnostic quote"
+
+    validate_target(tmp_path, target, verify_evidence=False)
+
+
+def test_audit_records_missing_target_requirement_as_warning(tmp_path: Path) -> None:
     _paper(tmp_path)
     _repository(tmp_path)
     target = _target(tmp_path)
-    audit, spec = _audit_and_spec(tmp_path, target, omit_metric_requirement=True)
-
-    with pytest.raises(StageValidationError, match="omitted target requirements: metric"):
-        validate_audit(
-            tmp_path,
-            target,
-            audit,
-            spec,
-            repository_commit="abc123",
-        )
-
-
-def test_bidirectional_audit_accepts_closed_mapping(tmp_path: Path) -> None:
-    _paper(tmp_path)
-    _repository(tmp_path)
-    target = _target(tmp_path)
-    audit, spec = _audit_and_spec(tmp_path, target)
+    audit = _audit(tmp_path, target, omit_metric_requirement=True)
 
     validate_audit(
         tmp_path,
         target,
         audit,
-        spec,
+        repository_commit="abc123",
+    )
+
+    assert "configuration audit omitted target requirements: metric" in audit.warnings
+
+
+def test_canonical_audit_accepts_closed_mapping(tmp_path: Path) -> None:
+    _paper(tmp_path)
+    _repository(tmp_path)
+    target = _target(tmp_path)
+    audit = _audit(tmp_path, target)
+
+    validate_audit(
+        tmp_path,
+        target,
+        audit,
         repository_commit="abc123",
     )
 
 
-def test_execution_spec_must_include_every_resolved_code_input(tmp_path: Path) -> None:
+def test_audit_can_skip_evidence_checks_for_command_preview(tmp_path: Path) -> None:
     _paper(tmp_path)
     _repository(tmp_path)
     target = _target(tmp_path)
-    audit, spec = _audit_and_spec(tmp_path, target)
-    spec.resolved_inputs = spec.resolved_inputs[:1]
+    audit = _audit(tmp_path, target)
+    assert audit.configuration[0].paper_evidence is not None
+    audit.configuration[0].paper_evidence.quote = "unverified diagnostic quote"
+    audit.entry_points[0].path = "missing.py"
 
-    with pytest.raises(
-        StageValidationError,
-        match="omitted resolved code inputs: code-metric",
-    ):
-        validate_audit(
-            tmp_path,
-            target,
-            audit,
-            spec,
-            repository_commit="abc123",
-        )
+    validate_audit(
+        tmp_path,
+        target,
+        audit,
+        repository_commit="abc123",
+        verify_evidence=False,
+    )
 
 
-def test_conflict_cannot_resolve_to_code_default() -> None:
-    with pytest.raises(ValidationError, match="resolve to the paper value"):
-        AuditItem(
-            id="learning-rate",
-            direction="code_to_paper",
-            category="optimization",
-            name="learning rate",
-            status="conflict_resolved",
-            code_value="0.002",
-            paper_value="0.01",
-            resolved_value="0.002",
-            paper_evidence=_evidence("The learning rate is set to 0.01 for all runs."),
-            code_evidence=CodeEvidence(path="train.py", snippet="lr=0.002"),
-            resolution="incorrectly retained code default",
-        )
+def test_conflict_values_are_not_compared_as_exact_strings() -> None:
+    item = ScientificConfigurationItem(
+        id="learning-rate",
+        category="optimization",
+        name="learning rate",
+        finding="paper_preferred",
+        code_default="Adam with configurable learning rate",
+        paper_value="Adam, lr=0.01",
+        chosen_value="0.01",
+        paper_evidence=_evidence("The learning rate is set to 0.01 for all runs."),
+        code_evidence=CodeEvidence(path="train.py", snippet="lr=args.learning_rate"),
+        notes="resolved to the paper learning rate",
+    )
+
+    assert item.chosen_value == "0.01"
 
 
 def test_preparation_must_match_frozen_scientific_artifacts(tmp_path: Path) -> None:
     _paper(tmp_path)
     _repository(tmp_path)
     target = _target(tmp_path)
-    audit, spec = _audit_and_spec(tmp_path, target)
+    audit = _audit(tmp_path, target)
     _write_json(tmp_path / "configuration_audit.json", audit.model_dump(mode="json"))
-    spec.audit_sha256 = sha256_file(tmp_path / "configuration_audit.json")
-    _write_json(tmp_path / "execution_spec.json", spec.model_dump(mode="json"))
 
     execution = tmp_path / "workspace" / "execution"
     execution.mkdir()
@@ -335,8 +292,8 @@ def test_preparation_must_match_frozen_scientific_artifacts(tmp_path: Path) -> N
     )
     dockerfile = execution / "Dockerfile"
     dockerfile.write_text("FROM scratch\n", encoding="utf-8")
-    build_log = tmp_path / "logs" / "build.log"
-    build_log.parent.mkdir()
+    build_log = tmp_path / "artifacts" / "logs" / "build.log"
+    build_log.parent.mkdir(parents=True)
     build_log.write_text("build passed\n", encoding="utf-8")
     smoke_log = tmp_path / "artifacts" / "smoke" / "smoke.log"
     smoke_log.parent.mkdir(parents=True)
@@ -352,55 +309,110 @@ def test_preparation_must_match_frozen_scientific_artifacts(tmp_path: Path) -> N
     environment = EnvironmentManifest(
         status="ready",
         image_tag="demo:test",
-        dockerfile="execution/Dockerfile",
+        dockerfile="workspace/execution/Dockerfile",
         dockerfile_sha256=hashlib.sha256(dockerfile.read_bytes()).hexdigest(),
-        build_log_path="logs/build.log",
+        build_log_path="artifacts/logs/build.log",
         build_succeeded=True,
     )
     _write_json(tmp_path / "environment_manifest.json", environment.model_dump(mode="json"))
     manifest = ExecutionManifest(
-        schema_version=2,
+        schema_version=3,
         status="ready",
         selected_experiment=target.selected_experiment,
         image_tag="demo:test",
-        launch_script="execution/launch.sh",
+        launch_script="workspace/execution/launch.sh",
         launch_script_sha256=hashlib.sha256(launch.read_bytes()).hexdigest(),
-        host_repository="repo",
+        host_repository="workspace/repo",
         container_repository="/run/workspace/repo",
         timeout_seconds=60,
-        expected_outputs=["full-run/metrics.json"],
+        expected_outputs=["artifacts/full-run/metrics.json"],
         smoke_test={
             "exit_code": 0,
-            "log_path": "smoke/smoke.log",
+            "log_path": "artifacts/smoke/smoke.log",
             "description": "bounded evaluation",
         },
         target_sha256=sha256_file(tmp_path / "target.json"),
         audit_sha256=sha256_file(tmp_path / "configuration_audit.json"),
-        execution_spec_sha256=sha256_file(tmp_path / "execution_spec.json"),
         environment_sha256=sha256_file(tmp_path / "environment_manifest.json"),
         repository_commit="abc123",
         entrypoint=_code_ref("def run"),
-        scientific_configuration=spec.resolved_inputs,
+        scientific_configuration=_resolved_inputs(),
         metric_name=target.metric_name,
-        metric_artifact=spec.result_artifact,
+        metric_artifact="artifacts/full-run/metrics.json",
         paper_target_value=target.metric_value,
         metric_extractor={
-            "source": "full-run/metrics.json",
+            "source": "artifacts/full-run/metrics.json",
             "format": "json",
             "selector": "median_accuracy",
         },
     )
 
-    validate_preparation(tmp_path, target, audit, spec, environment, manifest)
+    deferred_payload = manifest.model_dump(mode="json")
+    deferred_payload["environment_sha256"] = None
+    deferred_manifest = ExecutionManifest.model_validate(deferred_payload)
+    assert deferred_manifest.environment_sha256 is None
+
+    captured_payload = {
+        "environment": environment.model_dump(mode="json"),
+        "manifest": manifest.model_dump(mode="json"),
+    }
+    captured_payload["environment"]["dockerfile"] = (
+        "/run/workspace/execution/Dockerfile"
+    )
+    captured_payload["environment"]["build_log_path"] = (
+        "/run/artifacts/logs/build.log"
+    )
+    captured_manifest = captured_payload["manifest"]
+    captured_manifest["host_repository"] = str(tmp_path / "workspace" / "repo")
+    captured_manifest["launch_script"] = "/run/workspace/execution/launch.sh"
+    captured_manifest["expected_outputs"] = [
+        "/run/artifacts/full-run/metrics.json"
+    ]
+    captured_manifest["metric_artifact"] = "/run/artifacts/full-run/metrics.json"
+    captured_manifest["metric_extractor"]["source"] = (
+        "/run/artifacts/full-run/metrics.json"
+    )
+    captured_manifest["smoke_test"]["log_path"] = (
+        "/run/artifacts/smoke/smoke.log"
+    )
+    captured_manifest["paper_target_value"] = "0.90 ± 0.00"
+
+    migrated = pipeline._migrate_legacy_preparation_paths(
+        captured_payload, tmp_path
+    )
+    normalized = pipeline._normalize_preparation_output(
+        migrated,
+        run_dir=tmp_path,
+        target=target,
+        audit=audit,
+    )
+    replayed = PreparationStageOutput.model_validate(normalized)
+    assert replayed.environment.build_log_path == "artifacts/logs/build.log"
+    assert replayed.manifest.host_repository == "workspace/repo"
+    assert replayed.manifest.launch_script == "workspace/execution/launch.sh"
+    assert replayed.manifest.expected_outputs == [
+        "artifacts/full-run/metrics.json"
+    ]
+    assert replayed.manifest.metric_artifact == "artifacts/full-run/metrics.json"
+    assert replayed.manifest.paper_target_value == target.metric_value
+
+    validate_preparation(tmp_path, target, audit, environment, manifest)
 
     metric_output = tmp_path / "artifacts" / "full-run" / "metrics.json"
     metric_output.parent.mkdir(parents=True)
     metric_output.write_text('{"median_accuracy": 0.91}\n', encoding="utf-8")
-    assert _extract_metric(tmp_path, manifest) == ("0.91", "full-run/metrics.json")
+    assert _extract_metric(tmp_path, manifest) == (
+        "0.91",
+        "artifacts/full-run/metrics.json",
+    )
+
+    manifest.scientific_configuration = manifest.scientific_configuration[:1]
+    validate_preparation(tmp_path, target, audit, environment, manifest)
+    manifest.scientific_configuration = _resolved_inputs()
 
     manifest.metric_name = "r-squared"
     with pytest.raises(StageValidationError, match="metric differs from target"):
-        validate_preparation(tmp_path, target, audit, spec, environment, manifest)
+        validate_preparation(tmp_path, target, audit, environment, manifest)
 
 
 def test_recovery_rerun_always_regenerates_stale_report(
@@ -411,7 +423,7 @@ def test_recovery_rerun_always_regenerates_stale_report(
     _paper(run_dir)
     _repository(run_dir)
     target = _target(run_dir)
-    audit, spec = _audit_and_spec(run_dir, target)
+    audit = _audit(run_dir, target)
     _write_json(
         run_dir / "input.json",
         {
@@ -454,32 +466,31 @@ def test_recovery_rerun_always_regenerates_stale_report(
     async def fake_target(*args: object, **kwargs: object) -> TargetContract:
         return target
 
-    async def fake_audit(
-        *args: object, **kwargs: object
-    ) -> tuple[ConfigurationAudit, ExecutionSpec]:
-        return audit, spec
+    async def fake_audit(*args: object, **kwargs: object) -> ConfigurationAudit:
+        return audit
 
     environment = EnvironmentManifest(
         status="ready",
         image_tag="demo:test",
-        dockerfile="execution/Dockerfile",
+        dockerfile="workspace/execution/Dockerfile",
         dockerfile_sha256="0" * 64,
-        build_log_path="logs/build.log",
+        build_log_path="artifacts/logs/build.log",
         build_succeeded=True,
     )
     manifest = ExecutionManifest(
+        schema_version=1,
         status="ready",
         selected_experiment=target.selected_experiment,
         image_tag="demo:test",
-        launch_script="execution/launch.sh",
+        launch_script="workspace/execution/launch.sh",
         launch_script_sha256="0" * 64,
-        host_repository="repo",
+        host_repository="workspace/repo",
         container_repository="/run/workspace/repo",
         timeout_seconds=60,
-        expected_outputs=["full-run/metrics.json"],
+        expected_outputs=["artifacts/full-run/metrics.json"],
         smoke_test={
             "exit_code": 0,
-            "log_path": "smoke/smoke.log",
+            "log_path": "artifacts/smoke/smoke.log",
             "description": "test",
         },
     )

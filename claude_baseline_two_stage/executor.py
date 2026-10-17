@@ -94,15 +94,14 @@ def validate_manifest_files(run_dir: Path, manifest: ExecutionManifest) -> tuple
     if manifest.status != "ready":
         raise ManifestExecutionError(manifest.blocked_reason or "manifest is blocked")
 
-    workspace = run_dir / "workspace"
     assert manifest.launch_script is not None
     assert manifest.host_repository is not None
     assert manifest.launch_script_sha256 is not None
     assert manifest.smoke_test is not None
 
-    script = _inside(workspace, manifest.launch_script, must_exist=True)
-    repository = _inside(workspace, manifest.host_repository, must_exist=True)
-    smoke_log = _inside(run_dir / "artifacts", manifest.smoke_test.log_path, must_exist=True)
+    script = _inside(run_dir, manifest.launch_script, must_exist=True)
+    repository = _inside(run_dir, manifest.host_repository, must_exist=True)
+    smoke_log = _inside(run_dir, manifest.smoke_test.log_path, must_exist=True)
 
     if script.is_symlink() or not script.is_file():
         raise ManifestExecutionError("launch script must be a regular, non-symlink file")
@@ -183,7 +182,7 @@ def _extract_metric(run_dir: Path, manifest: ExecutionManifest) -> tuple[str | N
     extractor = manifest.metric_extractor
     if extractor is None:
         return None, None
-    source = _inside(run_dir / "artifacts", extractor.source, must_exist=True)
+    source = _inside(run_dir, extractor.source, must_exist=True)
     raw = source.read_text(encoding="utf-8", errors="replace")
     if extractor.format == "json":
         value: object = json.loads(raw)
@@ -253,7 +252,7 @@ def execute_manifest(
     assert manifest.container_repository is not None
     assert manifest.image_tag is not None
     assert manifest.timeout_seconds is not None
-    container_script = f"/run/workspace/{manifest.launch_script}"
+    container_script = f"/run/{manifest.launch_script}"
     command = [
         str(wrapper),
         "run",
@@ -302,7 +301,7 @@ def execute_manifest(
             error = f"{type(exc).__name__}: {exc}"
 
     duration = time.monotonic() - started
-    expected = [_inside(run_dir / "artifacts", relative) for relative in manifest.expected_outputs]
+    expected = [_inside(run_dir, relative) for relative in manifest.expected_outputs]
     missing = [
         relative
         for relative, path in zip(manifest.expected_outputs, expected, strict=True)

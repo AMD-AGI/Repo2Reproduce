@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -23,7 +24,6 @@ from .schemas import (
     EnvironmentManifest,
     ExecutionManifest,
     ExecutionResult,
-    ExecutionSpec,
     PreparationStageOutput,
     TargetContract,
 )
@@ -107,6 +107,7 @@ async def _run_structured_stage(
     max_turns: int,
     max_budget_usd: float,
     validator: Callable[[ModelT], None],
+    normalizer: Callable[[Any], Any] | None = None,
 ) -> tuple[ModelT, str]:
     """Invoke one constrained Claude stage and allow one evidence-based correction."""
 
@@ -158,7 +159,10 @@ async def _run_structured_stage(
             last_error = RuntimeError(f"{stage} ended without structured output")
         else:
             try:
-                artifact = schema.model_validate(result.structured_output)
+                raw_output = result.structured_output
+                if normalizer is not None:
+                    raw_output = normalizer(raw_output)
+                artifact = schema.model_validate(raw_output)
                 attempt_path = run_dir / "stage_attempts" / f"{stage}-{attempt}.json"
                 from .runner import _atomic_json
 
@@ -274,6 +278,7 @@ async def select_target(
     run_dir: Path,
     *,
     requested_target: str | None,
+    skip_evidence_validation: bool,
     assigned_gpu: str,
     model: str,
     max_turns: int,
@@ -284,7 +289,11 @@ async def select_target(
     path = run_dir / "target.json"
     if path.is_file() and _stage_succeeded(run_dir, "target_selection"):
         target = TargetContract.model_validate_json(path.read_text(encoding="utf-8"))
-        validate_target(run_dir, target)
+        validate_target(
+            run_dir,
+            target,
+            verify_evidence=not skip_evidence_validation,
+        )
         return target
 
     prompt = _render_prompt(
@@ -308,7 +317,11 @@ async def select_target(
         model=model,
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
-        validator=lambda artifact: validate_target(run_dir, artifact),
+        validator=lambda artifact: validate_target(
+            run_dir,
+            artifact,
+            verify_evidence=not skip_evidence_validation,
+        ),
     )
     _atomic_json(path, target.model_dump(mode="json"))
     _update_stage(run_dir, "target_selection", "succeeded", session_id=session_id)
@@ -320,31 +333,26 @@ async def audit_configuration(
     *,
     target: TargetContract,
     bootstrap: dict[str, Any],
+    skip_evidence_validation: bool,
     assigned_gpu: str,
     model: str,
     max_turns: int,
     max_budget_usd: float,
-) -> tuple[ConfigurationAudit, ExecutionSpec]:
+) -> ConfigurationAudit:
     from .runner import _atomic_json, _render_prompt
 
     audit_path = run_dir / "configuration_audit.json"
-    spec_path = run_dir / "execution_spec.json"
     repository_commit = str(bootstrap["repository_commit"])
-    if (
-        audit_path.is_file()
-        and spec_path.is_file()
-        and _stage_succeeded(run_dir, "configuration_audit")
-    ):
+    if audit_path.is_file() and _stage_succeeded(run_dir, "configuration_audit"):
         audit = ConfigurationAudit.model_validate_json(audit_path.read_text(encoding="utf-8"))
-        spec = ExecutionSpec.model_validate_json(spec_path.read_text(encoding="utf-8"))
         validate_audit(
             run_dir,
             target,
             audit,
-            spec,
             repository_commit=repository_commit,
+            verify_evidence=not skip_evidence_validation,
         )
-        return audit, spec
+        return audit
 
     target_hash = sha256_file(run_dir / "target.json")
     prompt = _render_prompt(
@@ -364,14 +372,12 @@ async def audit_configuration(
     prompt_path.write_text(prompt, encoding="utf-8")
 
     def _validate(output: AuditStageOutput) -> None:
-        if output.audit.status != output.execution_spec.status:
-            raise StageValidationError("audit and execution spec statuses must agree")
         validate_audit(
             run_dir,
             target,
             output.audit,
-            output.execution_spec,
             repository_commit=repository_commit,
+            verify_evidence=not skip_evidence_validation,
         )
 
     output, session_id = await _run_structured_stage(
@@ -387,10 +393,164 @@ async def audit_configuration(
         validator=_validate,
     )
     _atomic_json(audit_path, output.audit.model_dump(mode="json"))
-    output.execution_spec.audit_sha256 = sha256_file(audit_path)
-    _atomic_json(spec_path, output.execution_spec.model_dump(mode="json"))
     _update_stage(run_dir, "configuration_audit", "succeeded", session_id=session_id)
-    return output.audit, output.execution_spec
+    return output.audit
+
+
+def _normalize_preparation_output(
+    raw_output: Any,
+    *,
+    run_dir: Path,
+    target: TargetContract,
+    audit: ConfigurationAudit,
+) -> Any:
+    """Canonicalize LLM path spellings and Python-owned metadata before validation."""
+
+    if not isinstance(raw_output, dict):
+        return raw_output
+    output = copy.deepcopy(raw_output)
+    environment = output.get("environment")
+    manifest = output.get("manifest")
+    if not isinstance(environment, dict) or not isinstance(manifest, dict):
+        return output
+
+    manifest["selected_experiment"] = target.selected_experiment
+    manifest["metric_name"] = target.metric_name
+    manifest["paper_target_value"] = target.metric_value
+    manifest["target_sha256"] = sha256_file(run_dir / "target.json")
+    manifest["audit_sha256"] = sha256_file(run_dir / "configuration_audit.json")
+    manifest["repository_commit"] = audit.repository_commit
+    manifest["environment_sha256"] = None
+    return output
+
+
+def _migrate_legacy_preparation_paths(raw_output: Any, run_dir: Path) -> Any:
+    """Convert previously persisted path conventions to run-root-relative paths."""
+
+    if not isinstance(raw_output, dict):
+        return raw_output
+    output = copy.deepcopy(raw_output)
+    environment = output.get("environment")
+    manifest = output.get("manifest")
+    if not isinstance(environment, dict) or not isinstance(manifest, dict):
+        return output
+
+    dockerfile = environment.get("dockerfile")
+    if isinstance(dockerfile, str):
+        if dockerfile.startswith("/run/workspace/"):
+            environment["dockerfile"] = "workspace/" + dockerfile.removeprefix(
+                "/run/workspace/"
+            )
+        elif "\n" in dockerfile:
+            candidate = run_dir / "workspace" / "Dockerfile"
+            expected_hash = environment.get("dockerfile_sha256")
+            if (
+                candidate.is_file()
+                and isinstance(expected_hash, str)
+                and sha256_file(candidate) == expected_hash
+            ):
+                environment["dockerfile"] = "workspace/Dockerfile"
+        elif not dockerfile.startswith("workspace/"):
+            environment["dockerfile"] = f"workspace/{dockerfile}"
+
+    def artifact_path(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        if value.startswith("/run/artifacts/"):
+            return "artifacts/" + value.removeprefix("/run/artifacts/")
+        if not value.startswith("artifacts/"):
+            return f"artifacts/{value}"
+        return value
+
+    environment["build_log_path"] = artifact_path(
+        environment.get("build_log_path")
+    )
+
+    host_repository = manifest.get("host_repository")
+    if isinstance(host_repository, str):
+        host_path = Path(host_repository)
+        if host_repository.startswith("/run/workspace/"):
+            host_repository = "workspace/" + host_repository.removeprefix(
+                "/run/workspace/"
+            )
+        elif host_path.is_absolute():
+            try:
+                relative = host_path.resolve().relative_to(
+                    (run_dir / "workspace").resolve()
+                )
+                host_repository = str(Path("workspace") / relative)
+            except ValueError:
+                pass
+        elif not host_repository.startswith("workspace/"):
+            host_repository = f"workspace/{host_repository}"
+        manifest["host_repository"] = host_repository
+        if host_repository.startswith("workspace/"):
+            manifest["container_repository"] = f"/run/{host_repository}"
+
+    launch_script = manifest.get("launch_script")
+    if isinstance(launch_script, str):
+        if launch_script.startswith("/run/workspace/"):
+            launch_script = "workspace/" + launch_script.removeprefix(
+                "/run/workspace/"
+            )
+        elif not launch_script.startswith("workspace/"):
+            launch_script = f"workspace/{launch_script}"
+        manifest["launch_script"] = launch_script
+
+    manifest["expected_outputs"] = [
+        artifact_path(path) for path in manifest.get("expected_outputs", [])
+    ]
+    manifest["metric_artifact"] = artifact_path(
+        manifest.get("metric_artifact")
+    )
+    metric_extractor = manifest.get("metric_extractor")
+    if isinstance(metric_extractor, dict):
+        metric_extractor["source"] = artifact_path(metric_extractor.get("source"))
+    smoke_test = manifest.get("smoke_test")
+    if isinstance(smoke_test, dict):
+        smoke_test["log_path"] = artifact_path(smoke_test.get("log_path"))
+    return output
+
+
+def replay_preparation_artifacts(
+    run_dir: Path,
+    target: TargetContract,
+    audit: ConfigurationAudit,
+) -> tuple[EnvironmentManifest, ExecutionManifest]:
+    """Normalize, persist, and strictly validate an existing Stage 4 response."""
+
+    from .runner import _atomic_json
+
+    environment_path = run_dir / "environment_manifest.json"
+    manifest_path = run_dir / "execution_manifest.json"
+    persisted = {
+        "environment": _read_json(environment_path),
+        "manifest": _read_json(manifest_path),
+    }
+    persisted = _migrate_legacy_preparation_paths(persisted, run_dir)
+    normalized = _normalize_preparation_output(
+        persisted,
+        run_dir=run_dir,
+        target=target,
+        audit=audit,
+    )
+    output = PreparationStageOutput.model_validate(normalized)
+    if output.environment.status != output.manifest.status:
+        raise StageValidationError("environment and execution manifest statuses must agree")
+
+    _atomic_json(environment_path, output.environment.model_dump(mode="json"))
+    output.manifest.environment_sha256 = sha256_file(environment_path)
+    _atomic_json(manifest_path, output.manifest.model_dump(mode="json"))
+    if output.manifest.status == "ready":
+        validate_preparation(
+            run_dir,
+            target,
+            audit,
+            output.environment,
+            output.manifest,
+        )
+        validate_manifest_files(run_dir, output.manifest)
+    return output.environment, output.manifest
 
 
 async def prepare_environment(
@@ -398,7 +558,6 @@ async def prepare_environment(
     *,
     target: TargetContract,
     audit: ConfigurationAudit,
-    spec: ExecutionSpec,
     timeout_seconds: int,
     assigned_gpu: str,
     model: str,
@@ -409,39 +568,14 @@ async def prepare_environment(
 
     environment_path = run_dir / "environment_manifest.json"
     manifest_path = run_dir / "execution_manifest.json"
-    if (
-        environment_path.is_file()
-        and manifest_path.is_file()
-        and _stage_succeeded(run_dir, "environment_preparation")
-    ):
-        environment = EnvironmentManifest.model_validate_json(
-            environment_path.read_text(encoding="utf-8")
-        )
-        manifest = ExecutionManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
-        validate_preparation(run_dir, target, audit, spec, environment, manifest)
-        validate_manifest_files(run_dir, manifest)
-        return environment, manifest
 
-    target_hash = sha256_file(run_dir / "target.json")
-    audit_hash = sha256_file(run_dir / "configuration_audit.json")
-    spec_hash = sha256_file(run_dir / "execution_spec.json")
-    prompt = _render_prompt(
-        "prepare_environment.md",
-        {
-            "TARGET_PATH": str(run_dir / "target.json"),
-            "TARGET_SHA256": target_hash,
-            "AUDIT_PATH": str(run_dir / "configuration_audit.json"),
-            "AUDIT_SHA256": audit_hash,
-            "SPEC_PATH": str(run_dir / "execution_spec.json"),
-            "SPEC_SHA256": spec_hash,
-            "REPOSITORY": str(run_dir / "workspace" / spec.repository_path),
-            "WORKSPACE": str(run_dir / "workspace"),
-            "TIMEOUT_SECONDS": str(timeout_seconds),
-        },
-    )
-    prompt_path = run_dir / "prompts" / "environment_preparation.md"
-    prompt_path.parent.mkdir(parents=True, exist_ok=True)
-    prompt_path.write_text(prompt, encoding="utf-8")
+    def _normalize(raw_output: Any) -> Any:
+        return _normalize_preparation_output(
+            raw_output,
+            run_dir=run_dir,
+            target=target,
+            audit=audit,
+        )
 
     def _validate(output: PreparationStageOutput) -> None:
         if output.environment.status != output.manifest.status:
@@ -454,11 +588,48 @@ async def prepare_environment(
                 run_dir,
                 target,
                 audit,
-                spec,
                 output.environment,
                 output.manifest,
             )
             validate_manifest_files(run_dir, output.manifest)
+
+    if environment_path.is_file() and manifest_path.is_file():
+        try:
+            environment, manifest = replay_preparation_artifacts(
+                run_dir,
+                target,
+                audit,
+            )
+            _update_stage(run_dir, "environment_preparation", "succeeded")
+            return environment, manifest
+        except (
+            json.JSONDecodeError,
+            ValidationError,
+            StageValidationError,
+            ValueError,
+            RuntimeError,
+        ):
+            if _stage_succeeded(run_dir, "environment_preparation"):
+                raise
+
+    target_hash = sha256_file(run_dir / "target.json")
+    audit_hash = sha256_file(run_dir / "configuration_audit.json")
+    prompt = _render_prompt(
+        "prepare_environment.md",
+        {
+            "TARGET_PATH": str(run_dir / "target.json"),
+            "TARGET_SHA256": target_hash,
+            "AUDIT_PATH": str(run_dir / "configuration_audit.json"),
+            "AUDIT_SHA256": audit_hash,
+            "REPOSITORY": str(run_dir / "workspace" / audit.repository_path),
+            "REPOSITORY_COMMIT": audit.repository_commit,
+            "WORKSPACE": str(run_dir / "workspace"),
+            "TIMEOUT_SECONDS": str(timeout_seconds),
+        },
+    )
+    prompt_path = run_dir / "prompts" / "environment_preparation.md"
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_path.write_text(prompt, encoding="utf-8")
 
     output, session_id = await _run_structured_stage(
         run_dir,
@@ -471,10 +642,8 @@ async def prepare_environment(
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
         validator=_validate,
+        normalizer=_normalize,
     )
-    _atomic_json(environment_path, output.environment.model_dump(mode="json"))
-    output.manifest.environment_sha256 = sha256_file(environment_path)
-    _atomic_json(manifest_path, output.manifest.model_dump(mode="json"))
     _update_stage(run_dir, "environment_preparation", "succeeded", session_id=session_id)
     return output.environment, output.manifest
 
@@ -488,7 +657,7 @@ def _blocked(run_dir: Path, stage: str, reason: str) -> int:
 
 
 async def run_staged_pipeline(run_dir: Path, args: Any, *, recovering: bool = False) -> int:
-    """Run or resume the five-stage state machine."""
+    """Run or resume the six-stage state machine."""
 
     from .runner import (
         _atomic_json,
@@ -505,7 +674,13 @@ async def run_staged_pipeline(run_dir: Path, args: Any, *, recovering: bool = Fa
     metadata = _read_json(run_dir / "metadata.json")
     assigned_gpu = args.gpu or str(metadata.get("assigned_physical_gpu", "0"))
     model = args.model or str(metadata.get("model") or reasoning_model())
-    _update_metadata(run_dir, model=model, assigned_physical_gpu=assigned_gpu)
+    skip_evidence_validation = bool(getattr(args, "skip_evidence_validation", False))
+    _update_metadata(
+        run_dir,
+        model=model,
+        assigned_physical_gpu=assigned_gpu,
+        skip_evidence_validation=skip_evidence_validation,
+    )
 
     try:
         bootstrap = await bootstrap_sources(
@@ -516,6 +691,7 @@ async def run_staged_pipeline(run_dir: Path, args: Any, *, recovering: bool = Fa
         target = await select_target(
             run_dir,
             requested_target=requested_target,
+            skip_evidence_validation=skip_evidence_validation,
             assigned_gpu=assigned_gpu,
             model=model,
             max_turns=args.max_turns,
@@ -528,29 +704,21 @@ async def run_staged_pipeline(run_dir: Path, args: Any, *, recovering: bool = Fa
                 target.blocked_reason or "target selection blocked",
             )
 
-        audit, spec = await audit_configuration(
+        audit = await audit_configuration(
             run_dir,
             target=target,
             bootstrap=bootstrap,
+            skip_evidence_validation=skip_evidence_validation,
             assigned_gpu=assigned_gpu,
             model=model,
             max_turns=args.max_turns,
             max_budget_usd=args.max_budget_usd,
         )
-        if audit.status == "blocked" or spec.status == "blocked":
-            return _blocked(
-                run_dir,
-                "configuration_audit",
-                audit.blocked_reason
-                or spec.blocked_reason
-                or "scientific configuration audit blocked",
-            )
 
         environment, manifest = await prepare_environment(
             run_dir,
             target=target,
             audit=audit,
-            spec=spec,
             timeout_seconds=timeout_seconds,
             assigned_gpu=assigned_gpu,
             model=model,
@@ -566,7 +734,16 @@ async def run_staged_pipeline(run_dir: Path, args: Any, *, recovering: bool = Fa
                 or "environment preparation blocked",
             )
         if args.prepare_only:
-            _update_metadata(run_dir, status="prepared", manifest_status=manifest.status)
+            preparation_updates: dict[str, Any] = {
+                "status": "prepared",
+                "manifest_status": manifest.status,
+                "error": None,
+                "finished_at": _utc_now(),
+            }
+            if recovering:
+                preparation_updates["recovery_finished_at"] = _utc_now()
+                preparation_updates["recovery_error"] = None
+            _update_metadata(run_dir, **preparation_updates)
             print(f"Prepared manifest: {run_dir / 'execution_manifest.json'}")
             return 0
 
@@ -615,13 +792,17 @@ async def run_staged_pipeline(run_dir: Path, args: Any, *, recovering: bool = Fa
             )
             _update_stage(run_dir, "finalization", "succeeded")
 
-        _update_metadata(
-            run_dir,
-            status="completed",
-            execution_status=execution_result.status,
-            recovered=recovering,
-            finished_at=_utc_now(),
-        )
+        completion_updates: dict[str, Any] = {
+            "status": "completed",
+            "execution_status": execution_result.status,
+            "recovered": recovering,
+            "finished_at": _utc_now(),
+            "error": None,
+        }
+        if recovering:
+            completion_updates["recovery_finished_at"] = _utc_now()
+            completion_updates["recovery_error"] = None
+        _update_metadata(run_dir, **completion_updates)
         print(f"Run directory: {run_dir}")
         print(f"Execution status: {execution_result.status}")
         print(f"Final report: {report_path}")

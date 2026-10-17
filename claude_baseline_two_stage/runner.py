@@ -319,7 +319,6 @@ async def finalize_session(
         {
             "TARGET_PATH": str(run_dir / "target.json"),
             "AUDIT_PATH": str(run_dir / "configuration_audit.json"),
-            "SPEC_PATH": str(run_dir / "execution_spec.json"),
             "ENVIRONMENT_PATH": str(run_dir / "environment_manifest.json"),
             "MANIFEST_PATH": str(run_dir / "execution_manifest.json"),
             "RESULT_PATH": str(run_dir / "execution_result.json"),
@@ -359,6 +358,11 @@ async def finalize_session(
     target = TargetContract.model_validate_json(
         (run_dir / "target.json").read_text(encoding="utf-8")
     )
+    report.selected_experiment = target.selected_experiment
+    report.execution_status = execution_result.status
+    report.metric_name = target.metric_name
+    report.paper_target_value = target.metric_value
+    report.achieved_value = execution_result.achieved_metric
     validate_final_report(target, execution_result, report)
     _atomic_json(run_dir / "final_report.json", report.model_dump(mode="json"))
 
@@ -476,6 +480,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-turns", type=int, default=200)
     parser.add_argument("--max-budget-usd", type=float, default=100.0)
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument(
+        "--skip-evidence-validation",
+        action="store_true",
+        help=(
+            "Skip optional paper/code evidence diagnostics; scientific gaps remain "
+            "recorded by the agents"
+        ),
+    )
     return parser
 
 
@@ -492,8 +504,6 @@ def main() -> None:
     if args.recover_run:
         if args.paper_url or args.repo_url:
             parser.error("paper_url and repo_url cannot be used with --recover-run")
-        if args.prepare_only:
-            parser.error("--prepare-only cannot be used with --recover-run")
         operation = recover_existing_run(args)
     else:
         if not args.paper_url or not args.repo_url:

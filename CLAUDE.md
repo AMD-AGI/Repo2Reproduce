@@ -32,11 +32,11 @@ Before any quote is included in a final output, it must pass
 `mcp__r2r__verify_quote_in_paper`. Before any command flag is included, it must
 appear in the output of `mcp__r2r__extract_argparse` or `mcp__r2r__scan_configs`.
 
-## We PLAN, we do not RUN
+<!-- ## We PLAN, we do not RUN
 
 This system synthesizes and statically verifies the commands needed to reproduce a
 result. It must NOT launch training/evaluation jobs, download large datasets, push to
-git, or perform destructive actions. Safety hooks will block such commands.
+git, or perform destructive actions. Safety hooks will block such commands. -->
 
 ## Persistent memory (learn across runs)
 

@@ -30,8 +30,22 @@ ScientificCategory = Literal[
 
 def _relative_path(value: str, field_name: str) -> str:
     path = PurePosixPath(value)
-    if path.is_absolute() or ".." in path.parts or value in {"", "."}:
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or value in {"", "."}
+        or any(character in value for character in ("\n", "\r", "\0"))
+    ):
         raise ValueError(f"{field_name} must be a non-empty relative path")
+    return value
+
+
+def _run_root_path(value: str, field_name: str, prefix: str) -> str:
+    value = _relative_path(value, field_name)
+    if PurePosixPath(value).parts[0] != prefix:
+        raise ValueError(
+            f"{field_name} must be relative to the run root and start with {prefix}/"
+        )
     return value
 
 
@@ -79,6 +93,7 @@ class TargetContract(BaseModel):
     requirements: list[ScientificRequirement] = Field(default_factory=list)
     supporting_evidence: list[PaperEvidence] = Field(default_factory=list)
     alternatives_considered: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     blocked_reason: str | None = None
 
     @model_validator(mode="after")
@@ -108,61 +123,6 @@ class TargetContract(BaseModel):
         return self
 
 
-AuditStatus = Literal[
-    "match",
-    "conflict_resolved",
-    "paper_only",
-    "code_only_assumption",
-    "hardcoded",
-    "missing",
-    "paper_detail_not_implemented",
-]
-
-
-class AuditItem(BaseModel):
-    """One direction of the bidirectional paper/code configuration audit."""
-
-    id: str = Field(..., min_length=1)
-    direction: Literal["code_to_paper", "paper_to_code"]
-    requirement_id: str | None = None
-    category: ScientificCategory
-    name: str = Field(..., min_length=1)
-    critical: bool = True
-    status: AuditStatus
-    code_value: str | None = None
-    paper_value: str | None = None
-    resolved_value: str | None = None
-    paper_evidence: PaperEvidence | None = None
-    code_evidence: CodeEvidence | None = None
-    consumed_by: CodeEvidence | None = None
-    resolution: str
-
-    @model_validator(mode="after")
-    def validate_evidence_shape(self) -> AuditItem:
-        if self.status in {"match", "conflict_resolved"}:
-            if self.paper_evidence is None or self.code_evidence is None:
-                raise ValueError(f"{self.status} requires paper and code evidence")
-            if self.paper_value is None or self.code_value is None or self.resolved_value is None:
-                raise ValueError(f"{self.status} requires paper, code, and resolved values")
-        if self.status == "conflict_resolved" and self.resolved_value != self.paper_value:
-            raise ValueError("conflicts must resolve to the paper value")
-        if self.status == "code_only_assumption":
-            if self.code_evidence is None or self.code_value is None:
-                raise ValueError("code_only_assumption requires code evidence and code value")
-            if self.resolved_value is None:
-                raise ValueError("code_only_assumption requires an explicit resolved value")
-        if self.status in {
-            "paper_only",
-            "paper_detail_not_implemented",
-        } and (self.paper_evidence is None or self.paper_value is None):
-            raise ValueError(f"{self.status} requires paper evidence and paper value")
-        if self.status == "hardcoded" and (self.code_evidence is None or self.code_value is None):
-            raise ValueError("hardcoded requires code evidence and code value")
-        if self.direction == "paper_to_code" and not self.requirement_id:
-            raise ValueError("paper_to_code items require requirement_id")
-        return self
-
-
 class ExecutionPathStep(BaseModel):
     order: int = Field(..., ge=1)
     role: str
@@ -171,48 +131,86 @@ class ExecutionPathStep(BaseModel):
     outputs: list[str] = Field(default_factory=list)
 
 
-class ConfigurationAudit(BaseModel):
-    """Closed bidirectional inventory for the selected experiment."""
+ScientificFinding = Literal[
+    "match",
+    "paper_preferred",
+    "paper_missing",
+    "paper_partially_implemented",
+    "paper_not_implemented",
+]
 
-    schema_version: Literal[2] = 2
-    status: Literal["ready", "blocked"]
+
+class ScientificConfigurationItem(BaseModel):
+    """One canonical scientific input shared by both audit directions."""
+
+    id: str = Field(..., min_length=1)
+    category: ScientificCategory
+    name: str = Field(..., min_length=1)
+    requirement_ids: list[str] = Field(default_factory=list)
+    paper_value: str | None = None
+    paper_evidence: PaperEvidence | None = None
+    code_default: str | None = None
+    code_experiment_value: str | None = None
+    code_evidence: CodeEvidence | None = None
+    consumed_by: CodeEvidence | None = None
+    chosen_value: str | None = None
+    finding: ScientificFinding
+    notes: str = ""
+
+    @model_validator(mode="after")
+    def validate_finding(self) -> ScientificConfigurationItem:
+        if self.paper_value is not None and self.paper_evidence is None:
+            raise ValueError("paper values require verbatim paper evidence")
+        if self.finding in {"match", "paper_preferred"}:
+            if self.paper_value is None or self.code_evidence is None or self.chosen_value is None:
+                raise ValueError(
+                    f"{self.finding} requires paper value, code evidence, and chosen value"
+                )
+        if self.finding == "paper_missing":
+            if self.paper_value is not None or self.code_evidence is None:
+                raise ValueError("paper_missing requires code evidence and no paper value")
+            if self.chosen_value is None:
+                raise ValueError("paper_missing requires an explicit code fallback")
+        if self.finding == "paper_partially_implemented":
+            if self.paper_value is None or self.code_evidence is None:
+                raise ValueError(
+                    "paper_partially_implemented requires paper value and code evidence"
+                )
+        if self.finding == "paper_not_implemented":
+            if self.paper_value is None or not self.requirement_ids:
+                raise ValueError(
+                    "paper_not_implemented requires a paper value and target requirement"
+                )
+        return self
+
+
+class ConfigurationAudit(BaseModel):
+    """Canonical scientific configuration built from both audit directions."""
+
+    schema_version: Literal[3] = 3
     target_sha256: str
+    repository_path: str
+    repository_commit: str
     experiment_kind: str
     entry_points: list[CodeEvidence] = Field(default_factory=list)
     execution_path: list[ExecutionPathStep] = Field(default_factory=list)
-    code_to_paper: list[AuditItem] = Field(default_factory=list)
-    paper_to_code: list[AuditItem] = Field(default_factory=list)
-    code_to_paper_complete: bool = False
-    paper_to_code_complete: bool = False
-    critical_gaps: list[str] = Field(default_factory=list)
-    blocked_reason: str | None = None
+    configuration: list[ScientificConfigurationItem] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_audit_state(self) -> ConfigurationAudit:
         if not _SHA256.fullmatch(self.target_sha256):
             raise ValueError("target_sha256 must be a lowercase SHA-256 digest")
-        all_items = [*self.code_to_paper, *self.paper_to_code]
-        ids = [item.id for item in all_items]
+        self.repository_path = _relative_path(self.repository_path, "repository_path")
+        if not self.repository_commit.strip():
+            raise ValueError("repository_commit cannot be empty")
+        if not self.entry_points or not self.execution_path:
+            raise ValueError("configuration audit requires entry points and an execution path")
+        if not self.configuration:
+            raise ValueError("configuration audit requires scientific configuration items")
+        ids = [item.id for item in self.configuration]
         if len(ids) != len(set(ids)):
             raise ValueError("configuration audit item ids must be unique")
-        if self.status == "blocked":
-            if not self.blocked_reason or not self.blocked_reason.strip():
-                raise ValueError("blocked_reason is required when audit is blocked")
-            return self
-        if not self.entry_points or not self.execution_path:
-            raise ValueError("ready audit requires entry points and an execution path")
-        if not self.code_to_paper_complete or not self.paper_to_code_complete:
-            raise ValueError("ready audit requires both audit directions to be complete")
-        unresolved = [
-            item.id
-            for item in all_items
-            if item.critical
-            and item.status
-            in {"paper_only", "hardcoded", "missing", "paper_detail_not_implemented"}
-        ]
-        if unresolved or self.critical_gaps:
-            detail = unresolved + self.critical_gaps
-            raise ValueError(f"ready audit contains critical unresolved items: {detail}")
         return self
 
 
@@ -235,61 +233,27 @@ class ResolvedInput(BaseModel):
         return self
 
 
-class ExecutionSpec(BaseModel):
-    """Scientific execution specification produced by the audit stage."""
-
-    schema_version: Literal[2] = 2
-    status: Literal["ready", "blocked"]
-    target_sha256: str
-    audit_sha256: str | None = None
-    repository_path: str
-    repository_commit: str
-    experiment_kind: str
-    entrypoint: CodeEvidence
-    command_outline: str
-    resolved_inputs: list[ResolvedInput] = Field(default_factory=list)
-    result_artifact: str
-    metric_extraction: str
-    approved_scientific_patches: list[str] = Field(default_factory=list)
-    blocked_reason: str | None = None
-
-    @model_validator(mode="after")
-    def validate_spec(self) -> ExecutionSpec:
-        if not _SHA256.fullmatch(self.target_sha256):
-            raise ValueError("target_sha256 must be a lowercase SHA-256 digest")
-        if self.audit_sha256 is not None and not _SHA256.fullmatch(self.audit_sha256):
-            raise ValueError("audit_sha256 must be a lowercase SHA-256 digest")
-        self.repository_path = _relative_path(self.repository_path, "repository_path")
-        self.result_artifact = _relative_path(self.result_artifact, "result_artifact")
-        if self.status == "blocked":
-            if not self.blocked_reason or not self.blocked_reason.strip():
-                raise ValueError("blocked_reason is required when execution spec is blocked")
-            return self
-        if not self.command_outline.strip() or not self.resolved_inputs:
-            raise ValueError("ready execution spec requires a command outline and resolved inputs")
-        ids = [item.audit_item_id for item in self.resolved_inputs]
-        if len(ids) != len(set(ids)):
-            raise ValueError("resolved input audit_item_id values must be unique")
-        return self
-
-
 class AuditStageOutput(BaseModel):
     """Single structured output from code tracing and reconciliation."""
 
     audit: ConfigurationAudit
-    execution_spec: ExecutionSpec
 
 
 class SmokeTestResult(BaseModel):
     """Evidence that the prepared image and command shape passed a bounded pilot."""
 
     exit_code: int
-    log_path: str
+    log_path: str = Field(
+        ...,
+        description="Run-root-relative path starting with artifacts/.",
+    )
     description: str
 
     @model_validator(mode="after")
     def validate_log_path(self) -> SmokeTestResult:
-        self.log_path = _relative_path(self.log_path, "smoke_test.log_path")
+        self.log_path = _run_root_path(
+            self.log_path, "smoke_test.log_path", "artifacts"
+        )
         return self
 
 
@@ -299,9 +263,18 @@ class EnvironmentManifest(BaseModel):
     schema_version: Literal[2] = 2
     status: Literal["ready", "blocked"]
     image_tag: str | None = None
-    dockerfile: str | None = None
+    dockerfile: str | None = Field(
+        default=None,
+        description=(
+            "Run-root-relative path starting with workspace/. This field is a path, "
+            "never Dockerfile contents."
+        ),
+    )
     dockerfile_sha256: str | None = None
-    build_log_path: str | None = None
+    build_log_path: str | None = Field(
+        default=None,
+        description="Run-root-relative path starting with artifacts/.",
+    )
     build_succeeded: bool = False
     notes: list[str] = Field(default_factory=list)
     blocked_reason: str | None = None
@@ -324,8 +297,12 @@ class EnvironmentManifest(BaseModel):
         assert self.dockerfile is not None
         assert self.dockerfile_sha256 is not None
         assert self.build_log_path is not None
-        self.dockerfile = _relative_path(self.dockerfile, "dockerfile")
-        self.build_log_path = _relative_path(self.build_log_path, "build_log_path")
+        self.dockerfile = _run_root_path(
+            self.dockerfile, "dockerfile", "workspace"
+        )
+        self.build_log_path = _run_root_path(
+            self.build_log_path, "build_log_path", "artifacts"
+        )
         if not _SHA256.fullmatch(self.dockerfile_sha256):
             raise ValueError("dockerfile_sha256 must be a lowercase SHA-256 digest")
         if not self.build_succeeded:
@@ -338,7 +315,7 @@ class MetricExtractor(BaseModel):
 
     source: str = Field(
         ...,
-        description="Path relative to the run artifacts directory.",
+        description="Run-root-relative metric path starting with artifacts/.",
     )
     format: Literal["json", "regex"]
     selector: str = Field(
@@ -349,35 +326,48 @@ class MetricExtractor(BaseModel):
 
     @model_validator(mode="after")
     def validate_source(self) -> MetricExtractor:
-        self.source = _relative_path(self.source, "metric_extractor.source")
+        self.source = _run_root_path(
+            self.source, "metric_extractor.source", "artifacts"
+        )
         return self
 
 
 class ExecutionManifest(BaseModel):
     """Validated handoff produced by the preparation agent."""
 
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1, 3] = 3
     status: Literal["ready", "blocked"]
     selected_experiment: str
 
     image_tag: str | None = None
-    launch_script: str | None = None
+    launch_script: str | None = Field(
+        default=None,
+        description="Run-root-relative path starting with workspace/.",
+    )
     launch_script_sha256: str | None = None
-    host_repository: str | None = None
+    host_repository: str | None = Field(
+        default=None,
+        description="Run-root-relative repository path starting with workspace/.",
+    )
     container_repository: str | None = None
     timeout_seconds: int | None = Field(default=None, gt=0, le=604800)
-    expected_outputs: list[str] = Field(default_factory=list)
+    expected_outputs: list[str] = Field(
+        default_factory=list,
+        description="Run-root-relative output paths, each starting with artifacts/.",
+    )
     smoke_test: SmokeTestResult | None = None
     blocked_reason: str | None = None
     target_sha256: str | None = None
     audit_sha256: str | None = None
-    execution_spec_sha256: str | None = None
     environment_sha256: str | None = None
     repository_commit: str | None = None
     entrypoint: CodeEvidence | None = None
     scientific_configuration: list[ResolvedInput] = Field(default_factory=list)
     metric_name: str | None = None
-    metric_artifact: str | None = None
+    metric_artifact: str | None = Field(
+        default=None,
+        description="Run-root-relative metric path starting with artifacts/.",
+    )
     paper_target_value: str | None = None
     metric_extractor: MetricExtractor | None = None
 
@@ -410,9 +400,15 @@ class ExecutionManifest(BaseModel):
         assert self.launch_script_sha256 is not None
         assert self.smoke_test is not None
 
-        self.launch_script = _relative_path(self.launch_script, "launch_script")
-        self.host_repository = _relative_path(self.host_repository, "host_repository")
-        expected_container_repository = str(PurePosixPath("/run/workspace") / self.host_repository)
+        self.launch_script = _run_root_path(
+            self.launch_script, "launch_script", "workspace"
+        )
+        self.host_repository = _run_root_path(
+            self.host_repository, "host_repository", "workspace"
+        )
+        expected_container_repository = str(
+            PurePosixPath("/run") / self.host_repository
+        )
         if self.container_repository != expected_container_repository:
             raise ValueError(
                 "container_repository must map exactly to host_repository below /run/workspace"
@@ -425,12 +421,11 @@ class ExecutionManifest(BaseModel):
             raise ValueError("ready manifest requires at least one expected output")
 
         for output in self.expected_outputs:
-            _relative_path(output, "expected_outputs item")
-        if self.schema_version == 2:
-            v2_required = {
+            _run_root_path(output, "expected_outputs item", "artifacts")
+        if self.schema_version == 3:
+            versioned_required = {
                 "target_sha256": self.target_sha256,
                 "audit_sha256": self.audit_sha256,
-                "execution_spec_sha256": self.execution_spec_sha256,
                 "repository_commit": self.repository_commit,
                 "entrypoint": self.entrypoint,
                 "metric_name": self.metric_name,
@@ -438,21 +433,28 @@ class ExecutionManifest(BaseModel):
                 "paper_target_value": self.paper_target_value,
                 "metric_extractor": self.metric_extractor,
             }
-            missing_v2 = [name for name, value in v2_required.items() if not value]
-            if missing_v2:
-                raise ValueError(f"version 2 manifest is missing: {', '.join(missing_v2)}")
-            for name in (
-                "target_sha256",
-                "audit_sha256",
-                "execution_spec_sha256",
-            ):
+            missing_versioned = [
+                name for name, value in versioned_required.items() if not value
+            ]
+            if missing_versioned:
+                raise ValueError(
+                    f"version {self.schema_version} manifest is missing: "
+                    f"{', '.join(missing_versioned)}"
+                )
+            hash_names = ["target_sha256", "audit_sha256"]
+            for name in hash_names:
                 value = getattr(self, name)
                 if not isinstance(value, str) or not _SHA256.fullmatch(value):
                     raise ValueError(f"{name} must be a lowercase SHA-256 digest")
             if not self.scientific_configuration:
-                raise ValueError("version 2 manifest requires scientific_configuration")
+                raise ValueError(
+                    f"version {self.schema_version} manifest requires "
+                    "scientific_configuration"
+                )
             assert self.metric_artifact is not None
-            self.metric_artifact = _relative_path(self.metric_artifact, "metric_artifact")
+            self.metric_artifact = _run_root_path(
+                self.metric_artifact, "metric_artifact", "artifacts"
+            )
         return self
 
 
