@@ -1,3 +1,6 @@
-"""Repo2Reproduce: paper + code -> grounded reproduction plan."""
+"""Claude Code multistep research-reproduction agent."""
 
-__version__ = "0.1.0"
+from .schemas import ExecutionManifest, ExecutionResult, SmokeTestResult
+
+__version__ = "0.2.0"
+__all__ = ["ExecutionManifest", "ExecutionResult", "SmokeTestResult"]

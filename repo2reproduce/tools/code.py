@@ -8,18 +8,17 @@ actually found. If it is not here, it does not exist.
 from __future__ import annotations
 
 import ast
-import json
 import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 
 # --------------------------------------------------------------------------- #
 # Clone
 # --------------------------------------------------------------------------- #
-def _parse_github_tree_url(repo_url: str) -> tuple[str, Optional[str], Optional[str]]:
+def _parse_github_tree_url(repo_url: str) -> tuple[str, str | None, str | None]:
     """Split ``github.com/org/repo/tree/branch/subdir`` into clone components."""
     match = re.match(
         r"^(https?://github\.com/[^/]+/[^/]+?)(?:\.git)?/tree/([^/]+)(?:/(.+))?/?$",
@@ -65,9 +64,7 @@ def clone_repo(repo_url: str, dest: Path, depth: int = 1) -> dict[str, Any]:
         )
         source = Path(tmp) / subpath
         if not source.is_dir():
-            raise FileNotFoundError(
-                f"GitHub tree subdirectory not found after clone: {subpath}"
-            )
+            raise FileNotFoundError(f"GitHub tree subdirectory not found after clone: {subpath}")
         shutil.copytree(source, dest)
         commit = repo.head.commit.hexsha
     return {
@@ -125,7 +122,7 @@ def _literal(node: ast.AST) -> Any:
     """Best-effort literal extraction; returns a marker string for non-literals."""
     try:
         return ast.literal_eval(node)
-    except Exception:
+    except (SyntaxError, TypeError, ValueError):
         if isinstance(node, ast.Attribute):
             return f"<{node.attr}>"
         if isinstance(node, ast.Name):
@@ -174,7 +171,7 @@ def find_entry_points(repo_root: Path) -> dict[str, Any]:
             score += 1
         try:
             head = p.read_text(encoding="utf-8", errors="replace")[:4000]
-        except Exception:
+        except OSError:
             head = ""
         if "__main__" in head:
             score += 2

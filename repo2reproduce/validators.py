@@ -76,11 +76,7 @@ def validate_target(
     parse_json = run_dir / "paper" / "paper_parse.json"
     if not parse_json.is_file():
         raise StageValidationError("paper/paper_parse.json is missing")
-    warnings = (
-        verify_paper_evidence(parse_json, _paper_evidence(target))
-        if verify_evidence
-        else []
-    )
+    warnings = verify_paper_evidence(parse_json, _paper_evidence(target)) if verify_evidence else []
     categories = {item.category for item in target.requirements}
     required_categories = {"dataset", "metric"}
     missing_categories = sorted(required_categories - categories)
@@ -160,16 +156,13 @@ def validate_audit(
 
     requirement_ids = {item.id for item in target.requirements}
     mapped_ids = {
-        requirement_id
-        for item in audit.configuration
-        for requirement_id in item.requirement_ids
+        requirement_id for item in audit.configuration for requirement_id in item.requirement_ids
     }
     missing_requirements = sorted(requirement_ids - mapped_ids)
     unknown_requirements = sorted(mapped_ids - requirement_ids)
     if missing_requirements:
         warnings.append(
-            "configuration audit omitted target requirements: "
-            + ", ".join(missing_requirements)
+            "configuration audit omitted target requirements: " + ", ".join(missing_requirements)
         )
     if unknown_requirements:
         warnings.append(
@@ -226,9 +219,7 @@ def validate_preparation(
     if manifest.image_tag != environment.image_tag:
         errors.append("execution manifest image differs from environment manifest")
 
-    manifest_inputs = {
-        item.audit_item_id: item for item in manifest.scientific_configuration
-    }
+    manifest_inputs = {item.audit_item_id: item for item in manifest.scientific_configuration}
     if manifest.launch_script:
         launch_path = run_dir / manifest.launch_script
         if launch_path.is_file():

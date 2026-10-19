@@ -1,216 +1,33 @@
 # Repo2Reproduce
 
-Give it a **paper** (arXiv/PDF URL) and its **GitHub code**. It reads the *whole* paper
-and the code, picks the single most reproducible experiment, extracts the exact
-configuration, synthesizes the **grounded command(s)** to replicate the result, and — with
-`--amd --execute` — **enables the repo on AMD ROCm GPUs and runs it**.
+Repo2Reproduce is a Claude Code multistep agent that:
 
-It produces **three core outputs** (Track 1):
+1. parses a research paper and clones its official repository;
+2. selects a requested or central reproducible result;
+3. reconciles paper requirements with the repository's executable configuration;
+4. prepares and smoke-tests an isolated Docker environment;
+5. freezes an execution manifest and runs it deterministically; and
+6. compares the extracted metric with the paper target.
 
-1. **Selected experiment** — the *exact* paper text and table used to choose it.
-2. **Configuration** — all settings, hyperparameters, data, model, seed, hardware,
-   environment — with the paper value and the code default reconciled (conflicts and
-   gaps flagged).
-3. **Replication commands** — the ordered command(s) to run, with every flag verified
-   against the repository's real argparse / config definitions.
+The working agent is implemented entirely under `repo2reproduce/`.
 
-With `--amd` it adds **Track 2** (ROCm enablement): it selects a ROCm base image, ports
-dependencies, applies a HIP kernel patch when the repo has custom CUDA kernels, and emits
-a **verified Dockerfile** (Output 4). **Only `--amd --execute`** actually **builds the
-image and runs the reproduction on an AMD ROCm GPU**, capturing the achieved metric
-(Output 5).
+See [HOWTOUSE.md](HOWTOUSE.md) for requirements, installation, configuration, example
+runs, recovery, and generated artifacts.
 
-Everything is **evidence-grounded**: each claim is backed either by a verbatim paper
-quote (with a page locator) or a real file path/flag in the code.
-
-## How it works
-
-A deterministic Python phase runner controls ordering, dependencies, parallel groups,
-optional skips, persistence, and completion. Each phase is still performed by a focused
-Claude Agent SDK worker with its own prompt and tools.
-
-Two independent Markdown reviewers surround those structured phases:
-
-- The **pre-run verifier** reads the bootstrapped paper and repo before experiment
-  selection and writes `preflight.md` with local-reproducibility blockers, data/setup
-  checks, and the minimum meaningful experiment scope.
-- The **final verifier** reads `preflight.md`, phase artifacts, raw Docker logs, and the
-  draft/final report and writes `final_review.md` with unsupported numbers, silent scope
-  changes, and conclusion caveats.
-
-These reviews are advisory and intentionally do not use the phase JSON schemas.
-
-**Track 1 (always):**
-
-| Phase | Subagent | Output |
-|---|---|---|
-| Read the full paper | `paper-analyst` | paper map (experiments, tables, hyperparams) |
-| Map the repo | `code-cartographer` | entry points, CLI flags, configs, env |
-| Choose the experiment | `experiment-selector` | **Output 1** |
-| Extract & reconcile config | `config-extractor` | **Output 2** |
-| Synthesize commands | `command-synthesizer` | **Output 3** |
-| Audit grounding | `verifier` | gaps, assumptions, confidence |
-
-**Track 2 (`--amd`):**
-
-| Phase | Subagent | Output |
-|---|---|---|
-| Pick a ROCm base image | `base-image-selector` | `rocm/pytorch:*` tag |
-| Port dependencies for ROCm | `env-porter` | ROCm-safe requirements |
-| Migrate custom CUDA kernels | `kernel-migrator` | HIP-aware build patch |
-| Build + verify the image | `build-verifier` | **Output 4** (verified Dockerfile) |
-| Reconcile config/commands | `reconciler` | updated Outputs 2/3 |
-| Run on the GPU (`--execute`) | `executor` | **Output 5** (achieved metric) |
-
-**Paper reading is strict:** PDFs are parsed using **only**
-[OpenDataLoader PDF](https://github.com/opendataloader-project/opendataloader-pdf) — a
-deterministic, local-first, Java-based parser (no torch, no GPU, so it never disturbs a
-ROCm/CUDA ML environment).
-
-## Requirements
-
-- **Python 3.10–3.13** and **git**.
-- The **`claude` engine binary** on PATH. The Python Agent SDK runs the agent loop by
-  launching `claude` as a subprocess; without it the SDK raises `CLINotFoundError`.
-- **Java 11+** (OpenDataLoader PDF shells out to `java`). Java 8 will fail with
-  `UnsupportedClassVersionError` — see the install step below.
-- **LLM access:** an `ANTHROPIC_API_KEY` (public API) **or** an Anthropic-format gateway
-  key (see *Configure*).
-- **For `--amd --execute` only:** an **AMD ROCm GPU host** with the **ROCm driver**
-  loaded (`/dev/kfd` and `/dev/dri` present) and **Docker** installed and runnable by
-  your user. Plan-only `--amd` does *not* need a GPU or Docker.
-
-## Install
-
-### 1. Clone and install the Python package
+Basic invocation:
 
 ```bash
-git clone <this-repo> Repo2ROCm
-cd Repo2ROCm
-python3 -m pip install -e .
+r2r <paper-url> <repository-url> \
+  --target "<table, row, or result to reproduce>" \
+  --gpu 0
 ```
 
-### 2. Install the `claude` engine binary
+The equivalent module command is:
 
 ```bash
-curl -fsSL https://claude.ai/install.sh | bash   # installs to ~/.local/bin/claude
+python -m repo2reproduce <paper-url> <repository-url> \
+  --target "<table, row, or result to reproduce>" \
+  --gpu 0
 ```
 
-The orchestrator automatically prepends `~/.local/bin` to PATH at runtime (override the
-location with `R2R_CLI_BIN_DIR` in `.env`). Verify with `claude --version`.
-
-### 3. Install Java 17 (or any JRE 11+)
-
-```bash
-sudo apt-get install -y openjdk-17-jre-headless
-```
-
-> **Note:** if `sudo apt-get update` fails on an unrelated third-party repo (e.g. a stale
-> `compute-cdn.amd.com` ROCm source returning `404 ... no longer has a Release file`),
-> run the `install` command **on its own** (don't chain it with `&& update`) — the Ubuntu
-> package lists are already present, so the install succeeds. If needed, disable the broken
-> source in `/etc/apt/sources.list.d/` first.
-
-Find the install path and note it for `.env` (the exact dir name varies by distro/arch):
-
-```bash
-ls /usr/lib/jvm/                                # e.g. java-17-openjdk-amd64
-/usr/lib/jvm/<your-jdk>/bin/java -version       # should print 11+ (e.g. 17.x)
-```
-
-## Configure
-
-**One file, one source of truth** — all config, keys, and secrets live in `.env`:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env`. At minimum set the LLM provider and the Java home:
-
-**Public Anthropic API:**
-
-```bash
-R2R_PROVIDER=anthropic
-R2R_AUTH_MODE=api_key
-ANTHROPIC_API_KEY=sk-ant-...
-R2R_JAVA_HOME=/usr/lib/jvm/<your-jdk>   # a Java 11+ home
-```
-
-**An Anthropic-format gateway with custom auth headers** (e.g. AMD's internal LLM gateway):
-
-```bash
-R2R_PROVIDER=amd
-R2R_AUTH_MODE=custom_headers
-R2R_BASE_URL=<your-gateway-anthropic-endpoint>
-R2R_AUTH_HEADERS=<Your-Auth-Header>={key};user={user}
-R2R_AUTH_KEY=<secret>                  # the secret, inline
-R2R_AUTH_USER=<youruser>
-R2R_MODEL_REASONING=<reasoning-model-id>
-R2R_MODEL_MAPPING=<mapping-model-id>
-R2R_JAVA_HOME=/usr/lib/jvm/<your-jdk>   # a Java 11+ home
-```
-
-The `{key}`/`{user}` placeholders in the headers are filled at runtime from `R2R_AUTH_KEY`
-and `R2R_AUTH_USER` (defaults to `$USER`). Built-in fallback defaults (public Anthropic
-API, `opus`/`sonnet` tiers, budget/turn limits) apply only when a var is unset.
-
-### Verify your config before a full run
-
-```bash
-python3 -c "from repo2reproduce import config; print(config.active_provider_name()); print(config.provider_env())"
-```
-
-An empty dict `{}` is correct for the plain `anthropic` api_key case; a gateway prints
-`ANTHROPIC_BASE_URL` + `ANTHROPIC_CUSTOM_HEADERS`.
-
-## Run
-
-Run from the repo root (the CLI auto-loads `.env` from the current directory). If the
-`r2r` script isn't on PATH, use `python3 -m repo2reproduce.cli` instead.
-
-### Track 1 — plan the reproduction and Track 2 — enable on AMD ROCm
-
-```bash
-# Plan only: pick a ROCm base image, port deps, emit a verified Dockerfile (no GPU needed):
-r2r reproduce <paper_url> <repo_url> --amd
-
-# Full: build the image AND run the reproduction on an AMD GPU (needs Docker + ROCm host):
-r2r reproduce <paper_url> <repo_url> --amd --execute
-
-# Scope reduction is forbidden by default. Opt in only with explicit human approval:
-r2r reproduce <paper_url> <repo_url> --amd --execute --allow-scope-reduction
-```
-
-`--execute` implies `--amd`. In execute mode the tool runs containers with AMD GPU
-access.
-
-**Pin a run to one GPU** (e.g. on a multi-GPU host) — the value is forwarded into the
-container:
-
-```bash
-HIP_VISIBLE_DEVICES=0 r2r reproduce <paper_url> <repo_url> --amd --execute
-```
-
-## Output
-
-Artifacts land in `runs/<timestamp>-<repo>/`:
-
-- `report.md` / `report.json` — selected experiment, configuration, grounded commands,
-  and (with `--amd`) the ROCm Dockerfile + achieved metric. These are written only when
-  the mode-specific report is complete.
-- `pipeline_state.json` and `phases/*.json` — durable status/output for every phase.
-  Failed runs keep these files plus `draft_report.json`, so `r2r resume` can reuse
-  successful phases and retry only failed or unfinished work.
-- `preflight.md` / `final_review.md` — independent advisory reviews before experiment
-  selection and after report assembly.
-- the parsed paper and the cloned repo.
-
-## Notes
-
-- The safety hook blocks `rm -rf`, `git push`, `sudo`, and mass downloads. In plan mode it
-  also blocks anything that would launch training/eval; `--execute` relaxes this so the
-  reproduction can actually run inside the container.
-- Tune cost/turn limits and model tiers in `.env`
-  (`R2R_MAX_BUDGET_USD`, `R2R_MAX_TURNS`, `R2R_MODEL_REASONING`, `R2R_MODEL_MAPPING`).
-
+Run `r2r --help` for all options.

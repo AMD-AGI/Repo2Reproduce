@@ -27,8 +27,12 @@ def test_find_quote(tmp_path: Path):
             {
                 "markdown_path": str(md),
                 "blocks": [
-                    {"type": "text", "page": 5, "bbox": None,
-                     "text": "We train for 200 epochs with a learning rate of 0.1."}
+                    {
+                        "type": "text",
+                        "page": 5,
+                        "bbox": None,
+                        "text": "We train for 200 epochs with a learning rate of 0.1.",
+                    }
                 ],
             }
         ),

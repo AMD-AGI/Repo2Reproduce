@@ -24,7 +24,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -85,7 +85,7 @@ def parse_with_opendataloader(pdf_path: Path, out_dir: Path) -> dict[str, Any]:
     is older). Returns the artifact paths.
     """
     try:
-        import opendataloader_pdf  # noqa: F401
+        import opendataloader_pdf
     except ImportError as e:  # pragma: no cover - environment dependent
         raise RuntimeError(
             "opendataloader-pdf is not installed. Install with `pip install opendataloader-pdf` "
@@ -102,10 +102,10 @@ def parse_with_opendataloader(pdf_path: Path, out_dir: Path) -> dict[str, Any]:
         input_path=[str(pdf_path)],
         output_dir=str(out_dir),
         format="json,markdown,html",
-        table_method="cluster",          # border + clustering (handles merged cells)
-        reading_order="xycut",           # correct reading order
+        table_method="cluster",  # border + clustering (handles merged cells)
+        reading_order="xycut",  # correct reading order
         markdown_page_separator=PAGE_SEPARATOR,
-        image_output="external",         # save figures to disk, reference them
+        image_output="external",  # save figures to disk, reference them
         image_dir=str(out_dir / "images"),
         quiet=True,
         **({"threads": threads} if threads else {}),
@@ -177,7 +177,7 @@ def parse_paper(pdf_path: Path, work_dir: Path) -> ParsedPaper:
     )
 
 
-def _extract_blocks(json_path: Optional[str]) -> list[dict]:
+def _extract_blocks(json_path: str | None) -> list[dict]:
     """Flatten OpenDataLoader JSON into grounded blocks.
 
     Each block is ``{type, page, bbox, text}``. We also reconstruct table text from
@@ -188,7 +188,7 @@ def _extract_blocks(json_path: Optional[str]) -> list[dict]:
         return []
     try:
         data = json.loads(Path(json_path).read_text(encoding="utf-8"))
-    except Exception:
+    except (json.JSONDecodeError, OSError, UnicodeError):
         return []
 
     blocks: list[dict] = []
@@ -273,7 +273,7 @@ def _extract_blocks(json_path: Optional[str]) -> list[dict]:
     return blocks
 
 
-def _find_first(root: Path, suffixes: list[str]) -> Optional[Path]:
+def _find_first(root: Path, suffixes: list[str]) -> Path | None:
     """Return the most-likely main file under ``root`` matching any suffix."""
     if not root.exists():
         return None
@@ -287,7 +287,7 @@ def _find_first(root: Path, suffixes: list[str]) -> Optional[Path]:
     return candidates[0]
 
 
-def _as_str(p: Optional[Path]) -> Optional[str]:
+def _as_str(p: Path | None) -> str | None:
     return str(p) if p else None
 
 
@@ -307,8 +307,12 @@ def find_quote(parse_json_path: Path, quote: str) -> dict[str, Any]:
     payload = json.loads(Path(parse_json_path).read_text(encoding="utf-8"))
     nq = _normalize(quote)
     if len(nq) < 8:
-        return {"found": False, "locator": None, "matched_text": None,
-                "reason": "quote too short to verify reliably"}
+        return {
+            "found": False,
+            "locator": None,
+            "matched_text": None,
+            "reason": "quote too short to verify reliably",
+        }
 
     for b in payload.get("blocks", []):
         if nq in _normalize(b.get("text", "")):
@@ -329,11 +333,15 @@ def find_quote(parse_json_path: Path, quote: str) -> dict[str, Any]:
             loc = f"p.{page}" if page else "in paper (page unresolved)"
             return {"found": True, "locator": loc, "matched_text": quote}
 
-    return {"found": False, "locator": None, "matched_text": None,
-            "reason": "no whitespace-insensitive match in parsed paper"}
+    return {
+        "found": False,
+        "locator": None,
+        "matched_text": None,
+        "reason": "no whitespace-insensitive match in parsed paper",
+    }
 
 
-def _page_from_markdown(md_raw: str, quote: str, sep: str) -> Optional[int]:
+def _page_from_markdown(md_raw: str, quote: str, sep: str) -> int | None:
     """Estimate a page number by counting page separators before the quote match."""
     nmd = _normalize(md_raw)
     nq = _normalize(quote)

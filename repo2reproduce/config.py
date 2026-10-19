@@ -19,7 +19,7 @@ the CLI understands:
 * ``ANTHROPIC_CUSTOM_HEADERS``  -> gateway auth headers (for ``custom_headers`` auth)
 * ``ANTHROPIC_AUTH_TOKEN``      -> placeholder token so the CLI does not fall back to a
                                    saved login when a gateway uses header auth
-* ``ENABLE_TOOL_SEARCH``        -> keep our ``mcp__r2r__*`` tools working behind a
+* ``ENABLE_TOOL_SEARCH``        -> enable Claude Code tool search behind a
                                    non-Anthropic base URL
 """
 
@@ -27,8 +27,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Optional
 
 # --------------------------------------------------------------------------- #
 # Built-in fallback defaults (vendor-neutral; all overridable via .env).
@@ -36,8 +34,7 @@ from typing import Optional
 _DEFAULT_PROVIDER = "anthropic"
 _DEFAULT_API_KEY_ENV = "ANTHROPIC_API_KEY"
 _DEFAULT_REASONING_MODEL = "opus"
-_DEFAULT_MAPPING_MODEL = "sonnet"
-_DEFAULT_MAX_BUDGET_USD = 5.0
+_DEFAULT_MAX_BUDGET_USD = 100.0
 _DEFAULT_MAX_TURNS = 200
 _DEFAULT_AUTH_TOKEN = "gateway"
 
@@ -45,7 +42,7 @@ _DEFAULT_AUTH_TOKEN = "gateway"
 # --------------------------------------------------------------------------- #
 # Small env helpers
 # --------------------------------------------------------------------------- #
-def _env(*names: str) -> Optional[str]:
+def _env(*names: str) -> str | None:
     """Return the first non-empty environment variable among ``names``."""
     for n in names:
         v = os.environ.get(n)
@@ -86,14 +83,13 @@ def _parse_headers(spec: str) -> dict[str, str]:
 class Provider:
     name: str
     auth_mode: str  # "api_key" | "custom_headers"
-    base_url: Optional[str]
+    base_url: str | None
     api_key_env: str
-    key: Optional[str]  # resolved secret (custom_headers mode)
+    key: str | None  # resolved secret (custom_headers mode)
     headers: dict[str, str] = field(default_factory=dict)
     auth_token: str = _DEFAULT_AUTH_TOKEN
     enable_tool_search: bool = True
     reasoning_model: str = _DEFAULT_REASONING_MODEL
-    mapping_model: str = _DEFAULT_MAPPING_MODEL
 
 
 def active_provider_name() -> str:
@@ -119,7 +115,6 @@ def get_provider() -> Provider:
     }
 
     reasoning = os.environ.get("R2R_MODEL_REASONING") or _DEFAULT_REASONING_MODEL
-    mapping = os.environ.get("R2R_MODEL_MAPPING") or _DEFAULT_MAPPING_MODEL
 
     return Provider(
         name=name,
@@ -131,7 +126,6 @@ def get_provider() -> Provider:
         auth_token=os.environ.get("R2R_AUTH_TOKEN") or _DEFAULT_AUTH_TOKEN,
         enable_tool_search=_env_bool("R2R_ENABLE_TOOL_SEARCH", True),
         reasoning_model=reasoning,
-        mapping_model=mapping,
     )
 
 
@@ -176,10 +170,6 @@ def reasoning_model() -> str:
     return get_provider().reasoning_model
 
 
-def mapping_model() -> str:
-    return get_provider().mapping_model
-
-
 # --------------------------------------------------------------------------- #
 # Run guardrails
 # --------------------------------------------------------------------------- #
@@ -203,6 +193,6 @@ def max_turns() -> int:
     return _DEFAULT_MAX_TURNS
 
 
-def runtime_extra_path() -> Optional[str]:
+def runtime_extra_path() -> str | None:
     """Optional extra dir to prepend to PATH so the SDK finds the ``claude`` binary."""
     return os.environ.get("R2R_CLI_BIN_DIR")

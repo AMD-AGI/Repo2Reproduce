@@ -10,13 +10,22 @@ import pytest
 @pytest.fixture()
 def cfg(monkeypatch):
     """A fresh config module with all provider/config env vars cleared."""
-    import repo2reproduce.config as config
+    from repo2reproduce import config
 
     for var in [
-        "R2R_PROVIDER", "R2R_BASE_URL", "R2R_AUTH_MODE", "R2R_AUTH_HEADERS",
-        "R2R_AUTH_KEY", "R2R_AUTH_USER", "R2R_AUTH_TOKEN", "R2R_API_KEY_ENV",
-        "R2R_ENABLE_TOOL_SEARCH", "R2R_MODEL_REASONING", "R2R_MODEL_MAPPING",
-        "R2R_MAX_BUDGET_USD", "R2R_MAX_TURNS", "ANTHROPIC_API_KEY",
+        "R2R_PROVIDER",
+        "R2R_BASE_URL",
+        "R2R_AUTH_MODE",
+        "R2R_AUTH_HEADERS",
+        "R2R_AUTH_KEY",
+        "R2R_AUTH_USER",
+        "R2R_AUTH_TOKEN",
+        "R2R_API_KEY_ENV",
+        "R2R_ENABLE_TOOL_SEARCH",
+        "R2R_MODEL_REASONING",
+        "R2R_MAX_BUDGET_USD",
+        "R2R_MAX_TURNS",
+        "ANTHROPIC_API_KEY",
     ]:
         monkeypatch.delenv(var, raising=False)
     return importlib.reload(config)
@@ -27,7 +36,6 @@ def test_default_provider_is_anthropic(cfg):
     # api_key mode with no base_url -> no CLI env overrides needed.
     assert cfg.provider_env() == {}
     assert cfg.reasoning_model() == "opus"
-    assert cfg.mapping_model() == "sonnet"
 
 
 def test_api_key_mode_with_base_url(cfg, monkeypatch):
@@ -74,7 +82,7 @@ def test_gateway_missing_base_url_raises(cfg, monkeypatch):
 
 def test_run_guardrail_overrides(cfg, monkeypatch):
     assert cfg.max_turns() == 200
-    assert cfg.max_budget_usd() == 5.0
+    assert cfg.max_budget_usd() == 100.0
     monkeypatch.setenv("R2R_MAX_TURNS", "7")
     monkeypatch.setenv("R2R_MAX_BUDGET_USD", "12.5")
     assert cfg.max_turns() == 7

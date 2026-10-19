@@ -15,16 +15,15 @@ from urllib.parse import urlparse
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, SystemMessage, query
 from dotenv import load_dotenv
-from pydantic import ValidationError
 
 from repo2reproduce.provider import ensure_runtime_path, provider_env
 
-from .schemas import ExecutionManifest, ExecutionResult, FinalReport, TargetContract
+from . import config
+from .schemas import ExecutionResult, FinalReport, TargetContract
 from .validators import validate_final_report
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_RUNS_ROOT = Path("/shared_nfs/machita/claude-code-two-stage-runs")
-PREPARATION_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch"]
 FINALIZATION_TOOLS = ["Read", "Glob", "Grep"]
 
 
@@ -92,8 +91,8 @@ def initialize_run(
     assigned_gpu: str,
     timeout_seconds: int,
     target: str | None,
-) -> str:
-    """Create the isolated directory layout and preparation prompt."""
+) -> None:
+    """Create the isolated run directory and metadata."""
 
     if run_dir.exists() and any(run_dir.iterdir()):
         raise FileExistsError(f"run directory is not empty: {run_dir}")
@@ -141,16 +140,6 @@ def initialize_run(
             "target": target,
         },
     )
-    prompt = _render_prompt(
-        "select_target.md",
-        {
-            "PAPER_MD": str(run_dir / "paper" / "paper.md"),
-            "PAPER_PARSE": str(run_dir / "paper" / "paper_parse.json"),
-            "REPOSITORY": str(workspace / "repo"),
-            "TARGET": target or "(select one central locally reproducible result)",
-        },
-    )
-    (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     _atomic_json(
         run_dir / "metadata.json",
         {
@@ -168,7 +157,6 @@ def initialize_run(
             "stages": {},
         },
     )
-    return prompt
 
 
 def _agent_env(run_dir: Path, assigned_gpu: str) -> dict[str, str]:
@@ -227,74 +215,6 @@ def _base_options(
         "model": model,
         "env": _agent_env(run_dir, assigned_gpu),
     }
-
-
-async def prepare_manifest(
-    run_dir: Path,
-    *,
-    prompt: str,
-    assigned_gpu: str,
-    model: str,
-    max_turns: int,
-    max_budget_usd: float,
-) -> tuple[ExecutionManifest, str]:
-    """Run preparation and allow one semantic-manifest correction."""
-
-    log_path = run_dir / "logs" / "agent_messages.jsonl"
-    session_id: str | None = None
-    correction: str | None = None
-    validation_error: Exception | None = None
-
-    for attempt in range(2):
-        options_data = _base_options(
-            run_dir,
-            assigned_gpu=assigned_gpu,
-            model=model,
-            max_turns=max_turns,
-            max_budget_usd=max_budget_usd,
-        )
-        options_data.update(
-            {
-                "allowed_tools": PREPARATION_TOOLS,
-                "output_format": {
-                    "type": "json_schema",
-                    "schema": ExecutionManifest.model_json_schema(),
-                },
-            }
-        )
-        if session_id:
-            options_data["resume"] = session_id
-
-        result, observed_session = await _invoke_agent(
-            prompt=correction or prompt,
-            options=ClaudeAgentOptions(**options_data),
-            log_path=log_path,
-            stage=f"prepare-{attempt + 1}",
-        )
-        session_id = observed_session or session_id
-        if not session_id:
-            raise RuntimeError("preparation agent returned no session ID")
-        if result.is_error:
-            detail = result.result or ", ".join(result.errors or []) or "unknown SDK error"
-            terminal_reason = result.terminal_reason or result.stop_reason or "unknown"
-            raise RuntimeError(f"preparation agent failed ({terminal_reason}): {detail}")
-        if result.subtype != "success" or result.structured_output is None:
-            validation_error = RuntimeError(
-                f"preparation ended without structured output: {result.subtype}"
-            )
-        else:
-            try:
-                manifest = ExecutionManifest.model_validate(result.structured_output)
-                return manifest, session_id
-            except ValidationError as exc:
-                validation_error = exc
-
-        correction = (
-            "Your previous structured execution manifest failed deterministic validation. "
-            f"Correct only the manifest; do not run the full experiment. Error: {validation_error}"
-        )
-
-    raise RuntimeError(f"agent did not produce a valid execution manifest: {validation_error}")
 
 
 async def finalize_session(
@@ -463,7 +383,7 @@ async def run(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="r2r", description=__doc__)
     parser.add_argument("paper_url", nargs="?")
     parser.add_argument("repo_url", nargs="?")
     parser.add_argument(
@@ -477,8 +397,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gpu", help="Physical AMD GPU index (defaults to 0 or saved value)")
     parser.add_argument("--timeout-seconds", type=int, default=14400)
     parser.add_argument("--model")
-    parser.add_argument("--max-turns", type=int, default=200)
-    parser.add_argument("--max-budget-usd", type=float, default=100.0)
+    parser.add_argument("--max-turns", type=int, default=config.max_turns())
+    parser.add_argument("--max-budget-usd", type=float, default=config.max_budget_usd())
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument(
         "--skip-evidence-validation",

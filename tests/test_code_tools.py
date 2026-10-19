@@ -45,9 +45,7 @@ def test_extract_argparse(tmp_path: Path):
 def test_verify_flags(tmp_path: Path):
     src = tmp_path / "train.py"
     src.write_text(
-        "import argparse\n"
-        "p = argparse.ArgumentParser()\n"
-        "p.add_argument('--lr', default=0.1)\n",
+        "import argparse\np = argparse.ArgumentParser()\np.add_argument('--lr', default=0.1)\n",
         encoding="utf-8",
     )
     res = code_intel.verify_flags(src, ["--lr", "--nonexistent"])

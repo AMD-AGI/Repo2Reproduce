@@ -438,9 +438,7 @@ def _migrate_legacy_preparation_paths(raw_output: Any, run_dir: Path) -> Any:
     dockerfile = environment.get("dockerfile")
     if isinstance(dockerfile, str):
         if dockerfile.startswith("/run/workspace/"):
-            environment["dockerfile"] = "workspace/" + dockerfile.removeprefix(
-                "/run/workspace/"
-            )
+            environment["dockerfile"] = "workspace/" + dockerfile.removeprefix("/run/workspace/")
         elif "\n" in dockerfile:
             candidate = run_dir / "workspace" / "Dockerfile"
             expected_hash = environment.get("dockerfile_sha256")
@@ -462,22 +460,16 @@ def _migrate_legacy_preparation_paths(raw_output: Any, run_dir: Path) -> Any:
             return f"artifacts/{value}"
         return value
 
-    environment["build_log_path"] = artifact_path(
-        environment.get("build_log_path")
-    )
+    environment["build_log_path"] = artifact_path(environment.get("build_log_path"))
 
     host_repository = manifest.get("host_repository")
     if isinstance(host_repository, str):
         host_path = Path(host_repository)
         if host_repository.startswith("/run/workspace/"):
-            host_repository = "workspace/" + host_repository.removeprefix(
-                "/run/workspace/"
-            )
+            host_repository = "workspace/" + host_repository.removeprefix("/run/workspace/")
         elif host_path.is_absolute():
             try:
-                relative = host_path.resolve().relative_to(
-                    (run_dir / "workspace").resolve()
-                )
+                relative = host_path.resolve().relative_to((run_dir / "workspace").resolve())
                 host_repository = str(Path("workspace") / relative)
             except ValueError:
                 pass
@@ -490,9 +482,7 @@ def _migrate_legacy_preparation_paths(raw_output: Any, run_dir: Path) -> Any:
     launch_script = manifest.get("launch_script")
     if isinstance(launch_script, str):
         if launch_script.startswith("/run/workspace/"):
-            launch_script = "workspace/" + launch_script.removeprefix(
-                "/run/workspace/"
-            )
+            launch_script = "workspace/" + launch_script.removeprefix("/run/workspace/")
         elif not launch_script.startswith("workspace/"):
             launch_script = f"workspace/{launch_script}"
         manifest["launch_script"] = launch_script
@@ -500,9 +490,7 @@ def _migrate_legacy_preparation_paths(raw_output: Any, run_dir: Path) -> Any:
     manifest["expected_outputs"] = [
         artifact_path(path) for path in manifest.get("expected_outputs", [])
     ]
-    manifest["metric_artifact"] = artifact_path(
-        manifest.get("metric_artifact")
-    )
+    manifest["metric_artifact"] = artifact_path(manifest.get("metric_artifact"))
     metric_extractor = manifest.get("metric_extractor")
     if isinstance(metric_extractor, dict):
         metric_extractor["source"] = artifact_path(metric_extractor.get("source"))

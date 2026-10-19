@@ -8,13 +8,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from claude_agent_sdk import ResultMessage
 from pydantic import ValidationError
 
-from claude_baseline_two_stage import runner
-from claude_baseline_two_stage.executor import execute_manifest
-from claude_baseline_two_stage.runner import initialize_run
-from claude_baseline_two_stage.schemas import ExecutionManifest
+from repo2reproduce import runner
+from repo2reproduce.executor import execute_manifest
+from repo2reproduce.runner import initialize_run
+from repo2reproduce.schemas import ExecutionManifest
 
 
 def _manifest(script: Path, **updates: object) -> ExecutionManifest:
@@ -115,7 +114,7 @@ def test_manifest_rejects_unsafe_relative_paths(tmp_path: Path) -> None:
 
 def test_initialize_run_installs_isolation_files(tmp_path: Path) -> None:
     run_dir = tmp_path / "initialized"
-    prompt = initialize_run(
+    initialize_run(
         run_dir,
         run_id="initialized",
         paper_url="https://arxiv.org/abs/0000.00000",
@@ -131,8 +130,6 @@ def test_initialize_run_installs_isolation_files(tmp_path: Path) -> None:
     )
     hook_command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     assert str(run_dir / "workspace" / ".claude" / "hooks" / "enforce_bash.py") in hook_command
-    assert str(run_dir / "workspace" / "repo") not in prompt
-    assert "Read the ENTIRE paper Markdown" in prompt
 
 
 def test_project_environment_loads_repository_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,45 +142,6 @@ def test_project_environment_loads_repository_dotenv(monkeypatch: pytest.MonkeyP
     runner.load_project_environment()
 
     assert observed == {"path": runner.PACKAGE_DIR.parent / ".env", "override": False}
-
-
-def test_preparation_reports_sdk_authentication_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls = 0
-    result = ResultMessage(
-        subtype="success",
-        duration_ms=1,
-        duration_api_ms=0,
-        is_error=True,
-        num_turns=1,
-        session_id="session-1",
-        stop_reason="stop_sequence",
-        result="Not logged in",
-        structured_output=None,
-        terminal_reason="api_error",
-    )
-
-    async def fake_invoke(**_: Any) -> tuple[ResultMessage, str]:
-        nonlocal calls
-        calls += 1
-        return result, "session-1"
-
-    monkeypatch.setattr(runner, "_invoke_agent", fake_invoke)
-    monkeypatch.setattr(runner, "_base_options", lambda *args, **kwargs: {})
-
-    with pytest.raises(RuntimeError, match=r"failed \(api_error\): Not logged in"):
-        asyncio.run(
-            runner.prepare_manifest(
-                tmp_path,
-                prompt="prepare",
-                assigned_gpu="0",
-                model="model",
-                max_turns=1,
-                max_budget_usd=1,
-            )
-        )
-    assert calls == 1
 
 
 def test_executor_waits_and_records_success(tmp_path: Path) -> None:
@@ -262,7 +220,7 @@ def test_recovery_delegates_to_staged_pipeline_without_saved_session(
         observed.update(run_dir=_run_dir, args=args, recovering=recovering)
         return 0
 
-    monkeypatch.setattr("claude_baseline_two_stage.pipeline.run_staged_pipeline", fake_pipeline)
+    monkeypatch.setattr("repo2reproduce.pipeline.run_staged_pipeline", fake_pipeline)
     args = argparse.Namespace(
         recover_run=run_dir,
         gpu=None,

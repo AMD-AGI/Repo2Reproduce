@@ -1,329 +1,558 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
+import hashlib
 import json
-from importlib.metadata import version
+import shutil
 from pathlib import Path
 
-from repo2reproduce import orchestrator
-from repo2reproduce.hooks import build_hooks
+import pytest
+
+from repo2reproduce import pipeline, runner
+from repo2reproduce.executor import _extract_metric
+from repo2reproduce.schemas import (
+    CodeEvidence,
+    ConfigurationAudit,
+    EnvironmentManifest,
+    ExecutionManifest,
+    ExecutionPathStep,
+    ExecutionResult,
+    FinalReport,
+    PaperEvidence,
+    PreparationStageOutput,
+    ResolvedInput,
+    ScientificConfigurationItem,
+    ScientificRequirement,
+    TargetContract,
+)
+from repo2reproduce.validators import (
+    StageValidationError,
+    sha256_file,
+    validate_audit,
+    validate_final_report,
+    validate_preparation,
+    validate_target,
+)
+
+DATASET_QUOTE = "We evaluate every configuration on the DemoSet test split."
+METRIC_QUOTE = "The table reports median accuracy across four evaluations."
 
 
-def _outputs(*, build_status: str = "not_attempted", executor_ok: bool = True):
-    plan = {
-        "commands": [
-            {
-                "step": "evaluate",
-                "cmd": "python eval.py --model demo",
-                "flags_verified": True,
-            }
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _paper(run_dir: Path) -> None:
+    paper_dir = run_dir / "paper"
+    paper_dir.mkdir(parents=True)
+    markdown = paper_dir / "paper.md"
+    markdown.write_text(f"{DATASET_QUOTE}\n\n{METRIC_QUOTE}\n", encoding="utf-8")
+    _write_json(
+        paper_dir / "paper_parse.json",
+        {
+            "markdown_path": str(markdown),
+            "page_separator": "<!-- R2R_PAGE -->",
+            "blocks": [
+                {"type": "paragraph", "page": 1, "text": DATASET_QUOTE},
+                {"type": "paragraph", "page": 2, "text": METRIC_QUOTE},
+            ],
+        },
+    )
+
+
+def _evidence(quote: str) -> PaperEvidence:
+    return PaperEvidence(quote=quote, locator="unverified")
+
+
+def _target(run_dir: Path) -> TargetContract:
+    target = TargetContract(
+        status="ready",
+        selected_experiment="Table 1 / DemoSet / proposed method",
+        contribution="The proposed method improves DemoSet accuracy.",
+        result_location="Table 1, proposed method row, DemoSet column",
+        metric_name="accuracy",
+        metric_value="0.90",
+        metric_definition="fraction of correct predictions",
+        aggregation="median across four evaluations",
+        selection_reason="central result with an official implementation",
+        requirements=[
+            ScientificRequirement(
+                id="dataset",
+                category="dataset",
+                name="evaluation dataset",
+                value="DemoSet test split",
+                evidence=_evidence(DATASET_QUOTE),
+            ),
+            ScientificRequirement(
+                id="metric",
+                category="metric",
+                name="reported metric",
+                value="median accuracy across four evaluations",
+                evidence=_evidence(METRIC_QUOTE),
+            ),
         ],
-        "assumptions": [],
-    }
-    return {
-        "paper-analyst": {
-            "title": "Demo Paper",
-            "experiments": [],
-            "hyperparameters": [],
-        },
-        "code-cartographer": {
-            "entry_points": [],
-            "cli_flags": [],
-            "configs": [],
-            "readme_commands": [],
-        },
-        "base-image-selector": {
-            "base_image": "rocm/pytorch:test",
-            "rationale": "test fixture",
-            "risks": [],
-        },
-        "experiment-selector": {
-            "selected_experiment": "Table 1 demo",
-            "target_result": "1.0 accuracy",
-            "justification_quotes": [],
-            "why_this_one": "test fixture",
-            "alternatives_considered": [],
-        },
-        "env-porter": {
-            "requirements": [],
-            "dropped_pins": [],
-            "extra_install_cmds": [],
-            "notes": [],
-        },
-        "kernel-migrator": {
-            "has_custom_kernel": True,
-            "sources": ["kernel.cu"],
-            "note": "fixture",
-        },
-        "config-extractor": {},
-        "command-synthesizer": plan,
-        "build-verifier": {
-            "base_image": "rocm/pytorch:test",
-            "build_status": build_status,
-            "has_custom_kernel": False,
-            "amd_notes": [],
-        },
-        "reconciler": {
-            "updated_output2": "unchanged",
-            "updated_output3": plan,
-            "changes": [],
-        },
-        "executor": {
-            "executed": executor_ok,
-            "command_run": "python eval.py --model demo" if executor_ok else None,
-            "achieved_metric": "1.0 accuracy" if executor_ok else None,
-            "paper_target": "1.0 accuracy",
-            "match": True if executor_ok else None,
-            "delta": "0" if executor_ok else None,
-            "notes": "fixture",
-        },
-        "verifier": {
-            "issues_found": [],
-            "corrections_applied": [],
-            "gaps_and_assumptions": [],
-            "confidence": "high",
-            "confidence_rationale": "fixture",
-        },
-    }
+    )
+    validate_target(run_dir, target)
+    _write_json(run_dir / "target.json", target.model_dump(mode="json"))
+    return target
 
 
-def _install_fakes(monkeypatch, outputs, failures=None, calls=None, tasks=None):
-    failures = failures or set()
-    calls = calls if calls is not None else []
-    tasks = tasks if tasks is not None else {}
-
-    async def fake_bootstrap(phase: str, run_dir: Path, value: str):
-        del value
-        calls.append(phase)
-        if phase == "ingest-paper":
-            paper = run_dir / "paper"
-            paper.mkdir(parents=True, exist_ok=True)
-            (paper / "paper.md").write_text("# fixture", encoding="utf-8")
-            (paper / "paper_parse.json").write_text("{}", encoding="utf-8")
-            return {"markdown_path": str(paper / "paper.md")}
-        repo = run_dir / "repo"
-        repo.mkdir(parents=True, exist_ok=True)
-        return {"repo_path": str(repo)}
-
-    async def fake_worker(**kwargs):
-        phase = kwargs["phase"]
-        calls.append(phase)
-        tasks[phase] = kwargs["task"]
-        if phase in failures:
-            raise RuntimeError(f"fixture failure: {phase}")
-        return orchestrator.WorkerOutcome(
-            output=outputs[phase],
-            raw_text=None,
-            cost_usd=0.01,
-            is_error=False,
-            session_id=f"session-{phase}",
-        )
-
-    monkeypatch.setattr(orchestrator, "_bootstrap_operation", fake_bootstrap)
-    monkeypatch.setattr(orchestrator, "_run_worker_session", fake_worker)
-    monkeypatch.setattr(orchestrator.config, "max_budget_usd", lambda: 100.0)
-    monkeypatch.setattr(orchestrator.config, "max_turns", lambda: 1000)
-    return calls
+def _code_ref(snippet: str) -> CodeEvidence:
+    return CodeEvidence(path="run.py", locator="run", snippet=snippet)
 
 
-def _run(
-    tmp_path,
+def _audit(
+    run_dir: Path,
+    target: TargetContract,
     *,
-    amd=False,
-    execute=False,
-    allow_scope_reduction=False,
-    extra_instruction=None,
-):
-    return asyncio.run(
-        orchestrator._run_pipeline(
-            paper_url="https://example.test/paper",
-            repo_url="https://example.test/repo",
-            run_dir=tmp_path,
-            target="Table 1",
-            amd=amd,
-            execute=execute,
-            allow_scope_reduction=allow_scope_reduction,
-            on_text=None,
-            stream=False,
-            extra_instruction=extra_instruction,
-            enable_reviewers=False,
-        )
+    omit_metric_requirement: bool = False,
+) -> ConfigurationAudit:
+    target_hash = sha256_file(run_dir / "target.json")
+    dataset_match = ScientificConfigurationItem(
+        id="dataset",
+        category="dataset",
+        name="dataset",
+        paper_value="DemoSet test split",
+        paper_evidence=_evidence(DATASET_QUOTE),
+        code_experiment_value="DemoSet test split",
+        code_evidence=_code_ref('DATASET = "DemoSet"'),
+        consumed_by=_code_ref("def run"),
+        chosen_value="DemoSet test split",
+        requirement_ids=["dataset"],
+        finding="match",
+        notes="paper and code agree",
+    )
+    metric_match = ScientificConfigurationItem(
+        id="metric",
+        category="metric",
+        name="metric",
+        paper_value="median accuracy",
+        paper_evidence=_evidence(METRIC_QUOTE),
+        code_experiment_value="median accuracy",
+        code_evidence=_code_ref("median_accuracy"),
+        consumed_by=_code_ref("def run"),
+        chosen_value="median accuracy",
+        requirement_ids=[] if omit_metric_requirement else ["metric"],
+        finding="match",
+        notes="mapped to final aggregation",
+    )
+    audit = ConfigurationAudit(
+        target_sha256=target_hash,
+        repository_path="repo",
+        repository_commit="abc123",
+        experiment_kind="evaluation",
+        entry_points=[_code_ref("def run")],
+        execution_path=[
+            ExecutionPathStep(
+                order=1,
+                role="load, evaluate, and aggregate",
+                evidence=_code_ref("def run"),
+                inputs=["dataset"],
+                outputs=["median accuracy"],
+            )
+        ],
+        configuration=[dataset_match, metric_match],
+    )
+    return audit
+
+
+def _resolved_inputs() -> list[ResolvedInput]:
+    return [
+        ResolvedInput(
+            audit_item_id="dataset",
+            name="dataset",
+            value="DemoSet test split",
+            delivery="cli",
+            rendered="--dataset DemoSet",
+        ),
+        ResolvedInput(
+            audit_item_id="metric",
+            name="metric",
+            value="median accuracy",
+            delivery="hardcoded",
+        ),
+    ]
+
+
+def _repository(run_dir: Path) -> None:
+    repository = run_dir / "workspace" / "repo"
+    repository.mkdir(parents=True)
+    (repository / "run.py").write_text(
+        'DATASET = "DemoSet"\n'
+        "def median_accuracy(values):\n"
+        "    return sorted(values)[len(values) // 2]\n"
+        "def run():\n"
+        "    return median_accuracy([0.9])\n",
+        encoding="utf-8",
     )
 
 
-def test_execute_mode_rejects_not_attempted_build_output():
-    error = orchestrator._semantic_phase_error(
-        "build-verifier",
-        {"build_status": "not_attempted"},
-        execute=True,
-    )
-    assert error
-    assert "execute mode" in error
-    assert (
-        orchestrator._semantic_phase_error(
-            "build-verifier",
-            {"build_status": "verified"},
-            execute=True,
-        )
-        is None
-    )
-    assert (
-        orchestrator._semantic_phase_error(
-            "build-verifier",
-            {"build_status": "not_attempted"},
-            execute=False,
-        )
-        is None
-    )
+def test_target_quotes_are_verified_and_located(tmp_path: Path) -> None:
+    _paper(tmp_path)
+    target = _target(tmp_path)
+
+    assert all(requirement.evidence.verified for requirement in target.requirements)
+    assert target.requirements[0].evidence.locator == "p.1, paragraph"
 
 
-def test_track1_success_persists_every_phase(monkeypatch, tmp_path):
-    calls = _install_fakes(monkeypatch, _outputs())
+def test_target_can_skip_quote_checks_for_command_preview(tmp_path: Path) -> None:
+    _paper(tmp_path)
+    target = _target(tmp_path)
+    target.requirements[0].evidence.quote = "unverified diagnostic quote"
 
-    result = _run(tmp_path)
-
-    assert not result.is_error
-    assert (tmp_path / "report.json").exists()
-    assert (tmp_path / "pipeline_state.json").exists()
-    assert orchestrator.PipelineStore(tmp_path).succeeded("paper-analyst")
-    assert orchestrator.PipelineStore(tmp_path).succeeded("verifier")
-    assert calls.index("experiment-selector") > calls.index("paper-analyst")
-    assert calls.index("config-extractor") > calls.index("experiment-selector")
-    assert calls.index("command-synthesizer") > calls.index("config-extractor")
+    validate_target(tmp_path, target, verify_evidence=False)
 
 
-def test_scope_instruction_only_reaches_selected_result_workload_phases(
-    monkeypatch, tmp_path
-):
-    tasks = {}
-    _install_fakes(
-        monkeypatch,
-        _outputs(build_status="verified"),
-        tasks=tasks,
-    )
-    monkeypatch.setattr(
-        orchestrator.amd_tools,
-        "detect_cuda_kernels",
-        lambda repo: {"has_custom_kernel": False, "cuda_sources": []},
-    )
+def test_audit_records_missing_target_requirement_as_warning(tmp_path: Path) -> None:
+    _paper(tmp_path)
+    _repository(tmp_path)
+    target = _target(tmp_path)
+    audit = _audit(tmp_path, target, omit_metric_requirement=True)
 
-    result = _run(
+    validate_audit(
         tmp_path,
-        amd=True,
-        execute=True,
-        extra_instruction="USER_NOTE",
+        target,
+        audit,
+        repository_commit="abc123",
     )
 
-    assert not result.is_error
-    assert tasks["experiment-selector"].count("USER_NOTE") == 1
-    assert "SCOPE_REDUCTION_APPROVED" not in tasks["experiment-selector"]
-    assert "SCOPE_REDUCTION_APPROVED" not in tasks["paper-analyst"]
-    assert "SCOPE_REDUCTION_APPROVED" not in tasks["code-cartographer"]
-    assert "SCOPE_REDUCTION_APPROVED" not in tasks["build-verifier"]
+    assert "configuration audit omitted target requirements: metric" in audit.warnings
 
-    workload_phases = {
-        "config-extractor",
-        "command-synthesizer",
-        "reconciler",
-        "executor",
-        "verifier",
+
+def test_canonical_audit_accepts_closed_mapping(tmp_path: Path) -> None:
+    _paper(tmp_path)
+    _repository(tmp_path)
+    target = _target(tmp_path)
+    audit = _audit(tmp_path, target)
+
+    validate_audit(
+        tmp_path,
+        target,
+        audit,
+        repository_commit="abc123",
+    )
+
+
+def test_audit_can_skip_evidence_checks_for_command_preview(tmp_path: Path) -> None:
+    _paper(tmp_path)
+    _repository(tmp_path)
+    target = _target(tmp_path)
+    audit = _audit(tmp_path, target)
+    assert audit.configuration[0].paper_evidence is not None
+    audit.configuration[0].paper_evidence.quote = "unverified diagnostic quote"
+    audit.entry_points[0].path = "missing.py"
+
+    validate_audit(
+        tmp_path,
+        target,
+        audit,
+        repository_commit="abc123",
+        verify_evidence=False,
+    )
+
+
+def test_conflict_values_are_not_compared_as_exact_strings() -> None:
+    item = ScientificConfigurationItem(
+        id="learning-rate",
+        category="optimization",
+        name="learning rate",
+        finding="paper_preferred",
+        code_default="Adam with configurable learning rate",
+        paper_value="Adam, lr=0.01",
+        chosen_value="0.01",
+        paper_evidence=_evidence("The learning rate is set to 0.01 for all runs."),
+        code_evidence=CodeEvidence(path="train.py", snippet="lr=args.learning_rate"),
+        notes="resolved to the paper learning rate",
+    )
+
+    assert item.chosen_value == "0.01"
+
+
+def test_preparation_must_match_frozen_scientific_artifacts(tmp_path: Path) -> None:
+    _paper(tmp_path)
+    _repository(tmp_path)
+    target = _target(tmp_path)
+    audit = _audit(tmp_path, target)
+    _write_json(tmp_path / "configuration_audit.json", audit.model_dump(mode="json"))
+
+    execution = tmp_path / "workspace" / "execution"
+    execution.mkdir()
+    launch = execution / "launch.sh"
+    launch.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "REPO_DIR=/run/workspace/repo\n"
+        'cd "${REPO_DIR}"\n'
+        "mkdir -p /run/artifacts/full-run\n"
+        "python run.py --dataset DemoSet | "
+        "tee /run/artifacts/full-run/metrics.json\n",
+        encoding="utf-8",
+    )
+    dockerfile = execution / "Dockerfile"
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    build_log = tmp_path / "artifacts" / "logs" / "build.log"
+    build_log.parent.mkdir(parents=True)
+    build_log.write_text("build passed\n", encoding="utf-8")
+    smoke_log = tmp_path / "artifacts" / "smoke" / "smoke.log"
+    smoke_log.parent.mkdir(parents=True)
+    smoke_log.write_text("smoke passed\n", encoding="utf-8")
+    wrapper = tmp_path / "bin" / "docker"
+    wrapper.parent.mkdir()
+    shutil.copy2(
+        Path(__file__).parents[1] / "repo2reproduce" / "templates" / "docker-wrapper",
+        wrapper,
+    )
+    wrapper.chmod(0o755)
+
+    environment = EnvironmentManifest(
+        status="ready",
+        image_tag="demo:test",
+        dockerfile="workspace/execution/Dockerfile",
+        dockerfile_sha256=hashlib.sha256(dockerfile.read_bytes()).hexdigest(),
+        build_log_path="artifacts/logs/build.log",
+        build_succeeded=True,
+    )
+    _write_json(tmp_path / "environment_manifest.json", environment.model_dump(mode="json"))
+    manifest = ExecutionManifest(
+        schema_version=3,
+        status="ready",
+        selected_experiment=target.selected_experiment,
+        image_tag="demo:test",
+        launch_script="workspace/execution/launch.sh",
+        launch_script_sha256=hashlib.sha256(launch.read_bytes()).hexdigest(),
+        host_repository="workspace/repo",
+        container_repository="/run/workspace/repo",
+        timeout_seconds=60,
+        expected_outputs=["artifacts/full-run/metrics.json"],
+        smoke_test={
+            "exit_code": 0,
+            "log_path": "artifacts/smoke/smoke.log",
+            "description": "bounded evaluation",
+        },
+        target_sha256=sha256_file(tmp_path / "target.json"),
+        audit_sha256=sha256_file(tmp_path / "configuration_audit.json"),
+        environment_sha256=sha256_file(tmp_path / "environment_manifest.json"),
+        repository_commit="abc123",
+        entrypoint=_code_ref("def run"),
+        scientific_configuration=_resolved_inputs(),
+        metric_name=target.metric_name,
+        metric_artifact="artifacts/full-run/metrics.json",
+        paper_target_value=target.metric_value,
+        metric_extractor={
+            "source": "artifacts/full-run/metrics.json",
+            "format": "json",
+            "selector": "median_accuracy",
+        },
+    )
+
+    deferred_payload = manifest.model_dump(mode="json")
+    deferred_payload["environment_sha256"] = None
+    deferred_manifest = ExecutionManifest.model_validate(deferred_payload)
+    assert deferred_manifest.environment_sha256 is None
+
+    captured_payload = {
+        "environment": environment.model_dump(mode="json"),
+        "manifest": manifest.model_dump(mode="json"),
     }
-    for phase in workload_phases:
-        task = tasks[phase]
-        assert "SCOPE_REDUCTION_APPROVED: False" in task
-        assert "samples, epochs, steps, seeds, split coverage" in task
-        assert "selected result's evaluation workload" in task
-        assert "comparison arm" not in task.lower()
+    captured_payload["environment"]["dockerfile"] = "/run/workspace/execution/Dockerfile"
+    captured_payload["environment"]["build_log_path"] = "/run/artifacts/logs/build.log"
+    captured_manifest = captured_payload["manifest"]
+    captured_manifest["host_repository"] = str(tmp_path / "workspace" / "repo")
+    captured_manifest["launch_script"] = "/run/workspace/execution/launch.sh"
+    captured_manifest["expected_outputs"] = ["/run/artifacts/full-run/metrics.json"]
+    captured_manifest["metric_artifact"] = "/run/artifacts/full-run/metrics.json"
+    captured_manifest["metric_extractor"]["source"] = "/run/artifacts/full-run/metrics.json"
+    captured_manifest["smoke_test"]["log_path"] = "/run/artifacts/smoke/smoke.log"
+    captured_manifest["paper_target_value"] = "0.90 ± 0.00"
 
+    migrated = pipeline._migrate_legacy_preparation_paths(captured_payload, tmp_path)
+    normalized = pipeline._normalize_preparation_output(
+        migrated,
+        run_dir=tmp_path,
+        target=target,
+        audit=audit,
+    )
+    replayed = PreparationStageOutput.model_validate(normalized)
+    assert replayed.environment.build_log_path == "artifacts/logs/build.log"
+    assert replayed.manifest.host_repository == "workspace/repo"
+    assert replayed.manifest.launch_script == "workspace/execution/launch.sh"
+    assert replayed.manifest.expected_outputs == ["artifacts/full-run/metrics.json"]
+    assert replayed.manifest.metric_artifact == "artifacts/full-run/metrics.json"
+    assert replayed.manifest.paper_target_value == target.metric_value
 
-def test_parallel_failure_does_not_cancel_independent_worker(monkeypatch, tmp_path):
-    calls = _install_fakes(
-        monkeypatch,
-        _outputs(),
-        failures={"paper-analyst"},
+    validate_preparation(tmp_path, target, audit, environment, manifest)
+
+    metric_output = tmp_path / "artifacts" / "full-run" / "metrics.json"
+    metric_output.parent.mkdir(parents=True)
+    metric_output.write_text('{"median_accuracy": 0.91}\n', encoding="utf-8")
+    assert _extract_metric(tmp_path, manifest) == (
+        "0.91",
+        "artifacts/full-run/metrics.json",
     )
 
-    result = _run(tmp_path)
-    store = orchestrator.PipelineStore(tmp_path)
+    manifest.scientific_configuration = manifest.scientific_configuration[:1]
+    validate_preparation(tmp_path, target, audit, environment, manifest)
+    manifest.scientific_configuration = _resolved_inputs()
 
-    assert result.is_error
-    assert store.load("paper-analyst").status == "failed"
-    assert store.load("code-cartographer").status == "succeeded"
-    assert store.load("experiment-selector").status == "skipped"
-    assert "code-cartographer" in calls
-    assert (tmp_path / "draft_report.json").exists()
-    assert not (tmp_path / "report.json").exists()
+    manifest.metric_name = "r-squared"
+    with pytest.raises(StageValidationError, match="metric differs from target"):
+        validate_preparation(tmp_path, target, audit, environment, manifest)
 
 
-def test_no_custom_kernel_is_explicit_optional_skip(monkeypatch, tmp_path):
-    outputs = _outputs(build_status="not_attempted")
-    _install_fakes(monkeypatch, outputs)
-    monkeypatch.setattr(
-        orchestrator.amd_tools,
-        "detect_cuda_kernels",
-        lambda repo: {"has_custom_kernel": False, "cuda_sources": []},
+def test_recovery_rerun_always_regenerates_stale_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    _paper(run_dir)
+    _repository(run_dir)
+    target = _target(run_dir)
+    audit = _audit(run_dir, target)
+    _write_json(
+        run_dir / "input.json",
+        {
+            "paper_url": "https://example.test/paper.pdf",
+            "repo_url": "https://github.com/example/repo",
+            "timeout_seconds": 60,
+            "target": None,
+        },
+    )
+    _write_json(
+        run_dir / "metadata.json",
+        {
+            "status": "failed",
+            "assigned_physical_gpu": "0",
+            "model": "test-model",
+            "stages": {},
+        },
+    )
+    (run_dir / "bin").mkdir()
+    (run_dir / "logs").mkdir()
+    (run_dir / "artifacts").mkdir(exist_ok=True)
+    (run_dir / "execution_manifest.json").write_text("{}\n", encoding="utf-8")
+    previous = ExecutionResult(
+        status="failed",
+        command=["old"],
+        exit_code=1,
+        timed_out=False,
+        duration_seconds=1,
+        log_path=str(run_dir / "logs" / "executor.log"),
+        expected_outputs=["full-run/metrics.json"],
+        missing_outputs=["full-run/metrics.json"],
+        error="old failure",
+    )
+    _write_json(run_dir / "execution_result.json", previous.model_dump(mode="json"))
+    (run_dir / "final_report.md").write_text("stale report\n", encoding="utf-8")
+
+    async def fake_bootstrap(*args: object, **kwargs: object) -> dict:
+        return {"repository_commit": "abc123", "repository_path": "repo"}
+
+    async def fake_target(*args: object, **kwargs: object) -> TargetContract:
+        return target
+
+    async def fake_audit(*args: object, **kwargs: object) -> ConfigurationAudit:
+        return audit
+
+    environment = EnvironmentManifest(
+        status="ready",
+        image_tag="demo:test",
+        dockerfile="workspace/execution/Dockerfile",
+        dockerfile_sha256="0" * 64,
+        build_log_path="artifacts/logs/build.log",
+        build_succeeded=True,
+    )
+    manifest = ExecutionManifest(
+        schema_version=1,
+        status="ready",
+        selected_experiment=target.selected_experiment,
+        image_tag="demo:test",
+        launch_script="workspace/execution/launch.sh",
+        launch_script_sha256="0" * 64,
+        host_repository="workspace/repo",
+        container_repository="/run/workspace/repo",
+        timeout_seconds=60,
+        expected_outputs=["artifacts/full-run/metrics.json"],
+        smoke_test={
+            "exit_code": 0,
+            "log_path": "artifacts/smoke/smoke.log",
+            "description": "test",
+        },
     )
 
-    result = _run(tmp_path, amd=True, execute=False)
-    record = orchestrator.PipelineStore(tmp_path).load("kernel-migrator")
+    async def fake_prepare(
+        *args: object, **kwargs: object
+    ) -> tuple[EnvironmentManifest, ExecutionManifest]:
+        return environment, manifest
 
-    assert not result.is_error
-    assert record.status == "skipped"
-    assert record.skip_kind == "not_applicable"
-    assert record.output["has_custom_kernel"] is False
-    assert result.report["output4_amd_environment"]["build_status"] == "not_attempted"
-
-
-def test_execute_build_failure_is_honest_complete_result(monkeypatch, tmp_path):
-    outputs = _outputs(build_status="build_failed", executor_ok=False)
-    calls = _install_fakes(monkeypatch, outputs)
-    monkeypatch.setattr(
-        orchestrator.amd_tools,
-        "detect_cuda_kernels",
-        lambda repo: {"has_custom_kernel": False, "cuda_sources": []},
+    fresh_result = ExecutionResult(
+        status="succeeded",
+        command=["new"],
+        exit_code=0,
+        timed_out=False,
+        duration_seconds=2,
+        log_path=str(run_dir / "logs" / "executor.log"),
+        expected_outputs=["full-run/metrics.json"],
+        missing_outputs=[],
+        achieved_metric="0.91",
     )
 
-    result = _run(tmp_path, amd=True, execute=True)
-    executor = orchestrator.PipelineStore(tmp_path).load("executor")
+    async def fake_finalize(*args: object, **kwargs: object) -> str:
+        (run_dir / "final_report.md").write_text("fresh report\n", encoding="utf-8")
+        return "fresh report"
 
-    assert not result.is_error
-    assert executor.status == "skipped"
-    assert executor.output["executed"] is False
-    assert "executor" not in calls
-    assert result.report["output4_amd_environment"]["build_status"] == "build_failed"
-
-
-def test_resume_reuses_success_and_retries_failed_phase(monkeypatch, tmp_path):
-    outputs = _outputs()
-    first_calls = _install_fakes(
-        monkeypatch,
-        outputs,
-        failures={"paper-analyst"},
-    )
-    first = _run(tmp_path)
-    assert first.is_error
-    assert "code-cartographer" in first_calls
-
-    second_calls = []
-    _install_fakes(monkeypatch, outputs, calls=second_calls)
-    result = asyncio.run(
-        orchestrator.resume_run(
-            tmp_path,
-            instruction="Retry the failed paper analysis.",
-        )
+    monkeypatch.setattr(pipeline, "bootstrap_sources", fake_bootstrap)
+    monkeypatch.setattr(pipeline, "select_target", fake_target)
+    monkeypatch.setattr(pipeline, "audit_configuration", fake_audit)
+    monkeypatch.setattr(pipeline, "prepare_environment", fake_prepare)
+    monkeypatch.setattr(pipeline, "execute_manifest", lambda *args, **kwargs: fresh_result)
+    monkeypatch.setattr(runner, "finalize_session", fake_finalize)
+    args = argparse.Namespace(
+        gpu=None,
+        model=None,
+        max_turns=10,
+        max_budget_usd=1.0,
+        prepare_only=False,
     )
 
-    assert not result.is_error
-    assert "paper-analyst" in second_calls
-    assert "code-cartographer" not in second_calls
-    state = json.loads((tmp_path / "pipeline_state.json").read_text(encoding="utf-8"))
-    assert state["status"] == "completed"
+    exit_code = asyncio.run(pipeline.run_staged_pipeline(run_dir, args, recovering=True))
+
+    assert exit_code == 0
+    assert (run_dir / "final_report.md").read_text(encoding="utf-8") == "fresh report\n"
+    assert (run_dir / "final_report.pre-recovery.md").read_text(
+        encoding="utf-8"
+    ) == "stale report\n"
 
 
-def test_runtime_uses_fixed_sdk_and_non_orchestration_hooks():
-    sdk_version = tuple(int(part) for part in version("claude-agent-sdk").split(".")[:3])
-    hooks = build_hooks(execute=True, amd=True)
+def test_final_report_cannot_substitute_achieved_value(tmp_path: Path) -> None:
+    _paper(tmp_path)
+    target = _target(tmp_path)
+    result = ExecutionResult(
+        status="succeeded",
+        command=["python", "run.py"],
+        exit_code=0,
+        timed_out=False,
+        duration_seconds=1,
+        log_path="executor.log",
+        expected_outputs=["full-run/metrics.json"],
+        missing_outputs=[],
+        achieved_metric="0.91",
+        metric_source="full-run/metrics.json",
+    )
+    report = FinalReport(
+        selected_experiment=target.selected_experiment,
+        execution_status="succeeded",
+        metric_name=target.metric_name,
+        paper_target_value=target.metric_value,
+        achieved_value="0.99",
+        comparable=True,
+        match=True,
+        comparison_explanation="Incorrect substituted value.",
+    )
 
-    assert sdk_version >= (0, 2, 136)
-    assert set(hooks) == {"PreToolUse", "SubagentStart", "SubagentStop"}
-    assert len(hooks["PreToolUse"]) == 2  # Bash safety + observability logger
+    with pytest.raises(
+        StageValidationError,
+        match="achieved value differs from deterministic extraction",
+    ):
+        validate_final_report(target, result, report)
