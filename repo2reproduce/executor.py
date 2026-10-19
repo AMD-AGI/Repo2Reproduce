@@ -12,7 +12,20 @@ import subprocess
 import time
 from pathlib import Path
 
-from .schemas import ExecutionManifest, ExecutionResult
+from .schemas import (
+    ExecutionManifest,
+    ExecutionResult,
+    ForcedKernelPortingManifest,
+    PortedKernel,
+    RocmPortingManifest,
+)
+
+_KERNEL_DEFINITION = {
+    "hip": re.compile(r"__global__"),
+    "triton": re.compile(r"@triton\.(?:jit|autotune)"),
+    "composable_kernel": re.compile(r"\bck(?:_tile)?::|#\s*include\s*[<\"]ck(?:_tile)?/"),
+    "rocwmma": re.compile(r"\brocwmma::"),
+}
 
 
 class ManifestExecutionError(RuntimeError):
@@ -88,11 +101,65 @@ def _stop_labeled_containers(run_id: str) -> None:
         pass
 
 
+def validate_porting_files(run_dir: Path, manifest: RocmPortingManifest) -> None:
+    """Check that the patches and parity log named by a porting manifest exist on the host."""
+
+    port = manifest.rocm_port
+    workspace = run_dir / "workspace"
+    for relative in port.patches:
+        patch = _inside(workspace, relative, must_exist=True)
+        if not patch.is_file():
+            raise ManifestExecutionError(f"porting patch must be a regular file: {relative}")
+    for kernel in port.ported_kernels:
+        _validate_ported_kernel(workspace, kernel)
+    if port.parity_check is not None:
+        parity_log = _inside(run_dir / "artifacts", port.parity_check.log_path, must_exist=True)
+        if not parity_log.is_file() or parity_log.stat().st_size == 0:
+            raise ManifestExecutionError("parity-check log must be a non-empty regular file")
+    if isinstance(manifest, ForcedKernelPortingManifest):
+        for name in ("port-scan.json", "port-hipify.json"):
+            report = _inside(run_dir / "artifacts", name, must_exist=True)
+            if not report.is_file() or report.stat().st_size == 0:
+                raise ManifestExecutionError(
+                    f"forced kernel port requires a non-empty {name} report"
+                )
+
+
+def _read_regular_file(workspace: Path, relative: str, role: str) -> str:
+    path = _inside(workspace, relative, must_exist=True)
+    if not path.is_file():
+        raise ManifestExecutionError(f"{role} must be a regular file: {relative}")
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _validate_ported_kernel(workspace: Path, kernel: PortedKernel) -> None:
+    """Require the CUDA kernel to exist and its port to define a GPU kernel, not PyTorch ops."""
+
+    source = _read_regular_file(workspace, kernel.cuda_source, "ported_kernels.cuda_source")
+    if not re.search(rf"\b{re.escape(kernel.cuda_kernel)}\b", source):
+        raise ManifestExecutionError(
+            f"{kernel.cuda_source} does not mention CUDA kernel {kernel.cuda_kernel}"
+        )
+    definition = _KERNEL_DEFINITION[kernel.implementation]
+    texts = [
+        _read_regular_file(workspace, relative, "ported_kernels.port_files item")
+        for relative in kernel.port_files
+    ]
+    if not any(definition.search(text) for text in texts):
+        raise ManifestExecutionError(
+            f"the port of {kernel.cuda_kernel} is declared as {kernel.implementation} but none "
+            f"of {', '.join(kernel.port_files)} defines a {kernel.implementation} kernel; "
+            "a PyTorch fallback is not a port"
+        )
+
+
 def validate_manifest_files(run_dir: Path, manifest: ExecutionManifest) -> tuple[Path, Path]:
     """Validate all host-side files before starting Docker."""
 
     if manifest.status != "ready":
         raise ManifestExecutionError(manifest.blocked_reason or "manifest is blocked")
+    if isinstance(manifest, RocmPortingManifest):
+        validate_porting_files(run_dir, manifest)
 
     assert manifest.launch_script is not None
     assert manifest.host_repository is not None

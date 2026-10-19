@@ -26,6 +26,7 @@ from .schemas import (
     ExecutionResult,
     PreparationStageOutput,
     TargetContract,
+    preparation_stage_model,
 )
 from .validators import (
     StageValidationError,
@@ -504,6 +505,9 @@ def replay_preparation_artifacts(
     run_dir: Path,
     target: TargetContract,
     audit: ConfigurationAudit,
+    *,
+    rocm_porting: bool = False,
+    force_kernel_port: bool = False,
 ) -> tuple[EnvironmentManifest, ExecutionManifest]:
     """Normalize, persist, and strictly validate an existing Stage 4 response."""
 
@@ -522,7 +526,8 @@ def replay_preparation_artifacts(
         target=target,
         audit=audit,
     )
-    output = PreparationStageOutput.model_validate(normalized)
+    output_model = preparation_stage_model(rocm_porting, force_kernel_port)
+    output = output_model.model_validate(normalized)
     if output.environment.status != output.manifest.status:
         raise StageValidationError("environment and execution manifest statuses must agree")
 
@@ -551,6 +556,8 @@ async def prepare_environment(
     model: str,
     max_turns: int,
     max_budget_usd: float,
+    rocm_porting: bool = False,
+    force_kernel_port: bool = False,
 ) -> tuple[EnvironmentManifest, ExecutionManifest]:
     from .runner import _atomic_json, _render_prompt
 
@@ -587,6 +594,8 @@ async def prepare_environment(
                 run_dir,
                 target,
                 audit,
+                rocm_porting=rocm_porting,
+                force_kernel_port=force_kernel_port,
             )
             _update_stage(run_dir, "environment_preparation", "succeeded")
             return environment, manifest
@@ -615,6 +624,12 @@ async def prepare_environment(
             "TIMEOUT_SECONDS": str(timeout_seconds),
         },
     )
+    if rocm_porting:
+        from .runner import porting_policy_prompt
+
+        prompt += "\n" + porting_policy_prompt(
+            str(run_dir / "workspace"), force_kernel_port=force_kernel_port
+        )
     prompt_path = run_dir / "prompts" / "environment_preparation.md"
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt, encoding="utf-8")
@@ -623,7 +638,7 @@ async def prepare_environment(
         run_dir,
         stage="environment_preparation",
         prompt=prompt,
-        schema=PreparationStageOutput,
+        schema=preparation_stage_model(rocm_porting, force_kernel_port),
         tools=PREPARATION_TOOLS,
         assigned_gpu=assigned_gpu,
         model=model,
@@ -712,6 +727,8 @@ async def run_staged_pipeline(run_dir: Path, args: Any, *, recovering: bool = Fa
             model=model,
             max_turns=args.max_turns,
             max_budget_usd=args.max_budget_usd,
+            rocm_porting=bool(input_data.get("rocm_porting")),
+            force_kernel_port=bool(input_data.get("force_kernel_port")),
         )
         if environment.status == "blocked" or manifest.status == "blocked":
             return _blocked(

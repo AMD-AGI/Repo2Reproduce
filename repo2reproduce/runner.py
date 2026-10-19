@@ -8,6 +8,7 @@ import dataclasses
 import json
 import os
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from urllib.parse import urlparse
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, SystemMessage, query
 from dotenv import load_dotenv
 
+from repo2reproduce.porting.official_hipify import HipifyTool, ensure_hipify
 from repo2reproduce.provider import ensure_runtime_path, provider_env
 
 from . import config
@@ -82,6 +84,49 @@ def _append_message(path: Path, stage: str, message: Any) -> None:
         handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
+def porting_policy_prompt(workspace: str, *, force_kernel_port: bool) -> str:
+    """Render the CUDA-to-ROCm policy appended to environment preparation."""
+
+    requirement = (
+        "FORCED KERNEL PORT: The selected result must execute the paper's CUDA kernel "
+        "contribution after porting it with `hipify_with_fixes` or `targeted_rewrite`. "
+        "Every CUDA kernel the selected entrypoint launches, including preprocessing such "
+        "as quantization, must run as a ported HIP, Triton, Composable Kernel, or rocWMMA "
+        "kernel listed in `rocm_port.ported_kernels`. A PyTorch fallback for any of those "
+        "kernels, an existing ROCm fork, OpenCL implementation, the repository's Triton "
+        "path, a CPU reference, or disabling the extension does not satisfy the run. You "
+        "may use such implementations only as parity references or the full-precision "
+        "baseline. Persist every semantic source change "
+        "in the listed patch/edit-script files. A blocked result is valid only after both "
+        "`hipify_with_fixes` and `targeted_rewrite` were actually attempted."
+        if force_kernel_port
+        else "STANDARD PORTING: stop at the first strategy that produces the selected result."
+    )
+    return _render_prompt(
+        "rocm_porting.md",
+        {"WORKSPACE": workspace, "PORTING_REQUIREMENT": requirement},
+    )
+
+
+def _install_porting_commands(run_dir: Path) -> HipifyTool:
+    """Fetch the pinned official HIPIFY and install ``port-scan`` and ``port-hipify``."""
+
+    tool = ensure_hipify(run_dir / "tools")
+    bin_dir = run_dir / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for name, entry in (("port-scan", "scan_main"), ("port-hipify", "hipify_main")):
+        path = bin_dir / name
+        path.write_text(
+            f"#!{sys.executable}\n"
+            "from repo2reproduce.porting_commands import "
+            f"{entry}\n"
+            f"raise SystemExit({entry}())\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+    return tool
+
+
 def initialize_run(
     run_dir: Path,
     *,
@@ -91,6 +136,8 @@ def initialize_run(
     assigned_gpu: str,
     timeout_seconds: int,
     target: str | None,
+    rocm_porting: bool = False,
+    force_kernel_port: bool = False,
 ) -> None:
     """Create the isolated run directory and metadata."""
 
@@ -131,6 +178,9 @@ def initialize_run(
     }
     _atomic_json(workspace / ".claude" / "settings.json", settings)
 
+    hipify_tool: dict[str, str] | None = None
+    if rocm_porting:
+        hipify_tool = dataclasses.asdict(_install_porting_commands(run_dir))
     _atomic_json(
         run_dir / "input.json",
         {
@@ -138,6 +188,8 @@ def initialize_run(
             "repo_url": repo_url,
             "timeout_seconds": timeout_seconds,
             "target": target,
+            "rocm_porting": rocm_porting,
+            "force_kernel_port": force_kernel_port,
         },
     )
     _atomic_json(
@@ -152,6 +204,9 @@ def initialize_run(
             "container_visible_gpu": 0,
             "timeout_seconds": timeout_seconds,
             "target": target,
+            "rocm_porting": rocm_porting,
+            "force_kernel_port": force_kernel_port,
+            "hipify": hipify_tool,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "status": "initialized",
             "stages": {},
@@ -376,6 +431,8 @@ async def run(args: argparse.Namespace) -> int:
         assigned_gpu=assigned_gpu,
         timeout_seconds=args.timeout_seconds,
         target=args.target,
+        rocm_porting=args.rocm_porting,
+        force_kernel_port=args.force_kernel_port,
     )
     from .pipeline import run_staged_pipeline
 
@@ -408,6 +465,22 @@ def build_parser() -> argparse.ArgumentParser:
             "recorded by the agents"
         ),
     )
+    parser.add_argument(
+        "--rocm-porting",
+        action="store_true",
+        help=(
+            "Require CUDA-to-ROCm porting attempts before a CUDA-related block and a "
+            "numerical parity check for ported code. Installs host port-scan and port-hipify."
+        ),
+    )
+    parser.add_argument(
+        "--force-kernel-port",
+        action="store_true",
+        help=(
+            "Require the selected CUDA kernel contribution itself to run via "
+            "hipify_with_fixes or targeted_rewrite; requires --rocm-porting"
+        ),
+    )
     return parser
 
 
@@ -421,6 +494,12 @@ def main() -> None:
         raise SystemExit("--max-turns must be positive")
     if args.max_budget_usd <= 0:
         raise SystemExit("--max-budget-usd must be positive")
+    if args.force_kernel_port and not args.rocm_porting:
+        parser.error("--force-kernel-port requires --rocm-porting")
+    if (args.rocm_porting or args.force_kernel_port) and args.recover_run:
+        parser.error(
+            "porting modes are fixed when a run is created; recovered runs reuse the saved mode"
+        )
     if args.recover_run:
         if args.paper_url or args.repo_url:
             parser.error("paper_url and repo_url cannot be used with --recover-run")
