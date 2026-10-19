@@ -106,7 +106,11 @@ finding needs a decision recorded in the attempt evidence.
 `CLONE-hip` is generated output. Rerunning `port-hipify` with `--overwrite` regenerates it and
 discards edits made inside it, so keep your rewrites in patch files or edit scripts applied on
 top of the HIPIFY output. Point the Dockerfile or launch script at the translated copy, below
-/run/workspace, and apply the patches there.
+/run/workspace, and apply the patches there. The translated copy is then the repository the
+manifest describes: set `host_repository` to it (for example `workspace/repo-hip`), set
+`container_repository` to its exact container path (`/run/workspace/repo-hip`), and have the
+launch script `cd` to that same directory. Naming the untranslated clone in the manifest while
+the launch script runs from the translated copy is rejected before execution.
 
 For a forced kernel port, run both commands and use compile/runtime feedback to fix semantics,
 not just spelling: inline PTX or NVIDIA intrinsics, wave64 masks and subgroup widths, shared-memory

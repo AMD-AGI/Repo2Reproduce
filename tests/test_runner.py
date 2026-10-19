@@ -176,6 +176,50 @@ def test_executor_blocks_changed_launch_script(tmp_path: Path) -> None:
     assert not (run_dir / "logs" / "fake-docker-argv.txt").exists()
 
 
+def _write_launch_script(script: Path, *lines: str) -> None:
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        + "".join(f"{line}\n" for line in lines)
+        + "mkdir -p /run/artifacts/full-run\n"
+        "python train.py | tee /run/artifacts/full-run/stdout.log\n",
+        encoding="utf-8",
+    )
+
+
+def test_executor_accepts_a_repository_path_composed_from_variables(tmp_path: Path) -> None:
+    run_dir, script = _prepared_run(tmp_path)
+    _write_launch_script(
+        script,
+        "RUN_WS=/run/workspace",
+        'REPO="$RUN_WS/repo"',
+        'cd "$REPO"',
+    )
+
+    result = execute_manifest(run_dir, _manifest(script), assigned_gpu="3")
+
+    assert result.status == "succeeded"
+
+
+def test_executor_blocks_a_launch_script_that_runs_from_a_sibling_directory(
+    tmp_path: Path,
+) -> None:
+    run_dir, script = _prepared_run(tmp_path)
+    (run_dir / "workspace" / "repo-hip").mkdir()
+    _write_launch_script(
+        script,
+        "RUN_WS=/run/workspace",
+        'REPO_HIP="$RUN_WS/repo-hip"',
+        'cd "$REPO_HIP"',
+    )
+
+    result = execute_manifest(run_dir, _manifest(script), assigned_gpu="3")
+
+    assert result.status == "blocked"
+    assert "exact container_repository" in (result.error or "")
+    assert not (run_dir / "logs" / "fake-docker-argv.txt").exists()
+
+
 def test_executor_fails_when_expected_output_is_missing(tmp_path: Path) -> None:
     run_dir, script = _prepared_run(tmp_path, create_output=False)
     manifest = _manifest(script)
