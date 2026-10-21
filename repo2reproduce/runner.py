@@ -25,7 +25,6 @@ from .schemas import ExecutionResult, FinalReport, TargetContract
 from .validators import validate_final_report
 
 PACKAGE_DIR = Path(__file__).resolve().parent
-DEFAULT_RUNS_ROOT = Path("/shared_nfs/machita/claude-code-two-stage-runs")
 FINALIZATION_TOOLS = ["Read", "Glob", "Grep"]
 
 
@@ -450,7 +449,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--target")
     parser.add_argument("--run-id")
-    parser.add_argument("--runs-root", type=Path, default=DEFAULT_RUNS_ROOT)
+    parser.add_argument("--runs-root", type=Path, default=config.runs_root())
     parser.add_argument("--gpu", help="Physical AMD GPU index (defaults to 0 or saved value)")
     parser.add_argument("--timeout-seconds", type=int, default=14400)
     parser.add_argument("--model")

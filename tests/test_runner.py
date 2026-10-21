@@ -144,6 +144,17 @@ def test_project_environment_loads_repository_dotenv(monkeypatch: pytest.MonkeyP
     assert observed == {"path": runner.PACKAGE_DIR.parent / ".env", "override": False}
 
 
+def test_runs_root_defaults_inside_the_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("R2R_RUNS_ROOT", raising=False)
+    default = runner.build_parser().parse_args([]).runs_root
+    assert default == runner.PACKAGE_DIR.parent / "runs" / "multi-step"
+
+    monkeypatch.setenv("R2R_RUNS_ROOT", str(tmp_path / "runs"))
+    assert runner.build_parser().parse_args([]).runs_root == tmp_path / "runs"
+
+
 def test_executor_waits_and_records_success(tmp_path: Path) -> None:
     run_dir, script = _prepared_run(tmp_path)
     manifest = _manifest(script)
