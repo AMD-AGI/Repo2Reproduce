@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import hashlib
 import json
 import os
 import shutil
@@ -13,7 +14,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, SystemMessage, query
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    SystemMessage,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+    query,
+)
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
@@ -28,11 +38,16 @@ from .schemas import (
     FinalReport,
     TargetContract,
 )
-from .validators import validate_final_report
+from .validators import StageValidationError, validate_final_report
 
 PACKAGE_DIR = Path(__file__).resolve().parent
+SKILLS_DIR = PACKAGE_DIR / "skills"
 DEFAULT_RUNS_ROOT = Path("/shared_nfs/machita/claude-code-two-stage-runs")
 FINALIZATION_TOOLS = ["Read", "Glob", "Grep"]
+CONFIGURATION_AUDIT_SKILL = "configuration-audit"
+EXECUTION_REPAIR_SKILL = "execution-repair"
+RESULT_COMPARISON_SKILL = "paper-result-comparison"
+MATCH_TOLERANCE_PERCENT = 5
 
 
 def load_project_environment() -> None:
@@ -78,6 +93,92 @@ def _jsonable(value: Any) -> Any:
     if hasattr(value, "__dict__"):
         return _jsonable(vars(value))
     return str(value)
+
+
+class SkillUnavailableError(RuntimeError):
+    """Raised when Claude Code did not discover a stage's required skill."""
+
+
+@dataclasses.dataclass
+class SkillTrace:
+    """Skills discovered by Claude Code and requested by the model in one session."""
+
+    available: set[str] | None = None
+    requests: dict[str, str] = dataclasses.field(default_factory=dict)
+    failed_requests: set[str] = dataclasses.field(default_factory=set)
+
+    @property
+    def invoked(self) -> set[str]:
+        return {
+            name
+            for tool_use_id, name in self.requests.items()
+            if tool_use_id not in self.failed_requests
+        }
+
+    def observe(self, message: Any) -> None:
+        if isinstance(message, SystemMessage) and message.subtype == "init":
+            skills = message.data.get("skills")
+            if isinstance(skills, list):
+                self.available = {str(name) for name in skills}
+        elif isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, ToolUseBlock) and block.name == "Skill":
+                    name = block.input.get("skill")
+                    if isinstance(name, str):
+                        self.requests[block.id] = name.strip().lstrip("/")
+        elif isinstance(message, UserMessage) and isinstance(message.content, list):
+            for block in message.content:
+                if isinstance(block, ToolResultBlock) and block.is_error:
+                    self.failed_requests.add(block.tool_use_id)
+
+
+def require_skill_available(stage: str, skill: str, trace: SkillTrace) -> None:
+    """Fail fast when the CLI session cannot load the stage's skill at all."""
+
+    if trace.available is not None and skill not in trace.available:
+        raise SkillUnavailableError(
+            f"{stage}: Claude Code did not discover the required `{skill}` skill; "
+            "expected it under workspace/.claude/skills/"
+        )
+
+
+def require_skill_invoked(skill: str, trace: SkillTrace) -> None:
+    if skill not in trace.invoked:
+        raise StageValidationError(
+            f"the required `{skill}` skill was not loaded with the Skill tool. Invoke it, "
+            "re-check this stage's work against it, and return the corrected output"
+        )
+
+
+def _skill_digest(directory: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(item for item in directory.rglob("*") if item.is_file()):
+        digest.update(path.relative_to(directory).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def install_skills(run_dir: Path) -> dict[str, str]:
+    """Install the packaged stage skills as project skills of the run workspace.
+
+    Claude Code discovers project skills under ``<cwd>/.claude/skills``; every stage runs
+    with ``cwd`` set to the workspace and the ``project`` setting source enabled.
+    """
+
+    destination_root = run_dir / "workspace" / ".claude" / "skills"
+    destination_root.mkdir(parents=True, exist_ok=True)
+    installed: dict[str, str] = {}
+    for source in sorted(SKILLS_DIR.iterdir()):
+        if not (source / "SKILL.md").is_file():
+            continue
+        destination = destination_root / source.name
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source, destination)
+        installed[source.name] = _skill_digest(destination)
+    return installed
 
 
 def _append_message(path: Path, stage: str, message: Any) -> None:
@@ -138,6 +239,7 @@ def initialize_run(
         }
     }
     _atomic_json(workspace / ".claude" / "settings.json", settings)
+    skills = install_skills(run_dir)
 
     _atomic_json(
         run_dir / "input.json",
@@ -162,6 +264,7 @@ def initialize_run(
             "target": target,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "status": "initialized",
+            "skills": skills,
             "stages": {},
         },
     )
@@ -184,12 +287,15 @@ async def _invoke_agent(
     options: ClaudeAgentOptions,
     log_path: Path,
     stage: str,
+    skill_trace: SkillTrace | None = None,
 ) -> tuple[ResultMessage, str | None]:
     result: ResultMessage | None = None
     session_id: str | None = None
     try:
         async for message in query(prompt=prompt, options=options):
             _append_message(log_path, stage, message)
+            if skill_trace is not None:
+                skill_trace.observe(message)
             if isinstance(message, SystemMessage) and message.subtype == "init":
                 session_id = message.data.get("session_id")
             if isinstance(message, ResultMessage):
@@ -357,11 +463,13 @@ async def _request_final_report(
     model: str,
     max_turns: int,
     max_budget_usd: float,
+    skill: str = RESULT_COMPARISON_SKILL,
 ) -> FinalReport:
     """Request a structured report, allowing one schema-correction attempt."""
 
     correction: str | None = None
     session_id: str | None = None
+    skill_trace = SkillTrace()
     last_error = "finalization returned no structured report"
     for attempt in range(1, 3):
         options_data = _base_options(
@@ -374,6 +482,7 @@ async def _request_final_report(
         options_data.update(
             {
                 "allowed_tools": FINALIZATION_TOOLS,
+                "skills": [skill],
                 "output_format": {
                     "type": "json_schema",
                     "schema": FinalReport.model_json_schema(),
@@ -390,7 +499,9 @@ async def _request_final_report(
             options=ClaudeAgentOptions(**options_data),
             log_path=run_dir / "logs" / "agent_messages.jsonl",
             stage=f"finalize-{attempt}",
+            skill_trace=skill_trace,
         )
+        require_skill_available("finalization", skill, skill_trace)
         session_id = observed_session or session_id
         if result.is_error:
             last_error = (
@@ -402,16 +513,18 @@ async def _request_final_report(
             last_error = "finalization returned no structured report"
         else:
             try:
-                return FinalReport.model_validate(result.structured_output)
-            except ValidationError as exc:
+                report = FinalReport.model_validate(result.structured_output)
+                require_skill_invoked(skill, skill_trace)
+                return report
+            except (ValidationError, StageValidationError) as exc:
                 last_error = str(exc)
 
         correction = (
-            "Your previous final report failed the required output schema. Correct only "
-            "the report structure or fields identified below. Re-read the persisted "
-            "evidence when needed; do not launch or repeat the experiment and do not "
-            "change any frozen scientific value. Return only the corrected FinalReport. "
-            f"Validation error: {last_error}"
+            "Your previous final report failed the required output schema or stage "
+            "contract. Correct only the report structure or fields identified below. "
+            "Re-read the persisted evidence when needed; do not launch or repeat the "
+            "experiment and do not change any frozen scientific value. Return only the "
+            f"corrected FinalReport. Validation error: {last_error}"
         )
 
     raise RuntimeError(f"finalization failed after one correction retry: {last_error}")
@@ -447,6 +560,8 @@ async def finalize_session(
             "LOG_PATH": execution_result.log_path,
             "ARTIFACTS_PATH": str(run_dir / "artifacts"),
             "REPAIRS_PATH": str(run_dir / "execution_repairs"),
+            "SKILL": RESULT_COMPARISON_SKILL,
+            "MATCH_TOLERANCE_PERCENT": str(MATCH_TOLERANCE_PERCENT),
         },
     )
     (run_dir / "finalize_prompt.txt").write_text(prompt, encoding="utf-8")
@@ -558,6 +673,7 @@ async def recover_existing_run(args: argparse.Namespace) -> int:
         status="recovering",
         recovery_started_at=datetime.now(timezone.utc).isoformat(),
         recovery_error=None,
+        skills=install_skills(run_dir),
     )
     from .pipeline import run_staged_pipeline
 

@@ -9,8 +9,9 @@ authors = [{ name = "Repo2Reproduce" }]
 
 dependencies = [
     # Claude Agent SDK (isolated phase workers, structured output, custom MCP tools, hooks)
-    # 0.2.136+ includes the lifecycle/structured-result fixes required by phase workers.
-    "claude-agent-sdk>=0.2.136",
+    # 0.2.136+ includes the lifecycle/structured-result fixes required by phase workers;
+    # 0.2.166 is the verified floor for the per-stage `skills` option.
+    "claude-agent-sdk>=0.2.166",
     # --- Strict paper-reading layer (OpenDataLoader PDF ONLY; Java-based, no torch) ---
     "opendataloader-pdf>=2.4.0",
     # Ingestion / utilities
@@ -33,6 +34,7 @@ build-backend = "hatchling.build"
 packages = ["repo2reproduce"]
 include = [
     "repo2reproduce/prompts/*.md",
+    "repo2reproduce/skills/**/*.md",
     "repo2reproduce/templates/*",
 ]
 

@@ -70,6 +70,7 @@ def _update_stage(
     session_id: str | None = None,
     error: str | None = None,
     increment_attempt: bool = False,
+    skill: str | None = None,
 ) -> None:
     from .runner import _atomic_json
 
@@ -84,6 +85,8 @@ def _update_stage(
     record["updated_at"] = _utc_now()
     if session_id:
         record["session_id"] = session_id
+    if skill:
+        record["skill"] = skill
     if error:
         record["error"] = error
     else:
@@ -114,16 +117,29 @@ async def _run_structured_stage(
     validator: Callable[[ModelT], None],
     normalizer: Callable[[Any], Any] | None = None,
     initial_session_id: str | None = None,
+    skill: str | None = None,
 ) -> tuple[ModelT, str]:
-    """Invoke one constrained Claude stage and allow one evidence-based correction."""
+    """Invoke one constrained Claude stage and allow one evidence-based correction.
 
-    from .runner import _base_options, _invoke_agent
+    ``skill`` names the single project skill exposed to this stage; it must be loaded
+    before the stage output is accepted. Stages without a skill see no skills.
+    """
+
+    from .runner import (
+        SkillTrace,
+        SkillUnavailableError,
+        _base_options,
+        _invoke_agent,
+        require_skill_available,
+        require_skill_invoked,
+    )
 
     log_path = run_dir / "logs" / "agent_messages.jsonl"
     session_id = initial_session_id
     resume_fallback_available = initial_session_id is not None
     correction: str | None = None
     last_error: Exception | None = None
+    skill_trace = SkillTrace()
 
     maximum_attempts = 4 if initial_session_id else 2
     for attempt in range(1, maximum_attempts + 1):
@@ -133,6 +149,7 @@ async def _run_structured_stage(
             "running",
             session_id=session_id,
             increment_attempt=True,
+            skill=skill,
         )
         options_data = _base_options(
             run_dir,
@@ -144,6 +161,7 @@ async def _run_structured_stage(
         options_data.update(
             {
                 "allowed_tools": tools,
+                "skills": [skill] if skill else [],
                 "output_format": {
                     "type": "json_schema",
                     "schema": schema.model_json_schema(),
@@ -157,7 +175,14 @@ async def _run_structured_stage(
             options=ClaudeAgentOptions(**options_data),
             log_path=log_path,
             stage=f"{stage}-{attempt}",
+            skill_trace=skill_trace,
         )
+        if skill:
+            try:
+                require_skill_available(stage, skill, skill_trace)
+            except SkillUnavailableError as exc:
+                _update_stage(run_dir, stage, "failed", session_id=session_id, error=str(exc))
+                raise
         session_id = observed_session or session_id
         invocation_failed = False
         if result.is_error:
@@ -178,6 +203,8 @@ async def _run_structured_stage(
                 from .runner import _atomic_json
 
                 _atomic_json(attempt_path, artifact.model_dump(mode="json"))
+                if skill:
+                    require_skill_invoked(skill, skill_trace)
                 validator(artifact)
                 if not session_id:
                     raise RuntimeError(f"{stage} returned no session ID")
@@ -191,6 +218,7 @@ async def _run_structured_stage(
             session_id = None
             resume_fallback_available = False
             correction = None
+            skill_trace = SkillTrace()
             continue
         if not session_id:
             break
@@ -357,7 +385,7 @@ async def audit_configuration(
     max_turns: int,
     max_budget_usd: float,
 ) -> ConfigurationAudit:
-    from .runner import _atomic_json, _render_prompt
+    from .runner import CONFIGURATION_AUDIT_SKILL, _atomic_json, _render_prompt
 
     audit_path = run_dir / "configuration_audit.json"
     repository_commit = str(bootstrap["repository_commit"])
@@ -383,6 +411,7 @@ async def audit_configuration(
             "REPOSITORY": str(run_dir / "workspace" / "repo"),
             "REPOSITORY_RELATIVE": str(bootstrap["repository_path"]),
             "REPOSITORY_COMMIT": repository_commit,
+            "SKILL": CONFIGURATION_AUDIT_SKILL,
         },
     )
     prompt_path = run_dir / "prompts" / "configuration_audit.md"
@@ -409,6 +438,7 @@ async def audit_configuration(
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
         validator=_validate,
+        skill=CONFIGURATION_AUDIT_SKILL,
     )
     _atomic_json(audit_path, output.audit.model_dump(mode="json"))
     _update_stage(run_dir, "configuration_audit", "succeeded", session_id=session_id)
@@ -850,7 +880,7 @@ async def repair_execution(
 ) -> tuple[EnvironmentManifest, ExecutionManifest, str]:
     """Ask the preparation agent for one bounded repair and validate it."""
 
-    from .runner import _atomic_json, _render_prompt
+    from .runner import EXECUTION_REPAIR_SKILL, _atomic_json, _render_prompt
 
     target_sha256 = sha256_file(run_dir / "target.json")
     audit_sha256 = sha256_file(run_dir / "configuration_audit.json")
@@ -878,6 +908,7 @@ async def repair_execution(
             "REPOSITORY": str(run_dir / "workspace" / audit.repository_path),
             "REPOSITORY_COMMIT": audit.repository_commit,
             "REPAIRS_PATH": str(run_dir / "execution_repairs"),
+            "SKILL": EXECUTION_REPAIR_SKILL,
         },
     )
     prompt_path = run_dir / "prompts" / f"execution_repair-{attempt}.md"
@@ -1006,6 +1037,7 @@ async def repair_execution(
             validator=_validate,
             normalizer=_normalize,
             initial_session_id=preparation_session,
+            skill=EXECUTION_REPAIR_SKILL,
         )
     except Exception:
         (run_dir / "target.json").write_bytes(target_bytes)

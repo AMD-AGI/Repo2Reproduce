@@ -788,6 +788,143 @@ def test_structured_stage_falls_back_when_saved_session_is_unavailable(
     assert observed_resumes == ["expired-session", None]
 
 
+def _smoke_success(session: str) -> tuple[object, str]:
+    return (
+        SimpleNamespace(
+            is_error=False,
+            result=None,
+            errors=[],
+            terminal_reason=None,
+            stop_reason=None,
+            subtype="success",
+            structured_output={
+                "exit_code": 0,
+                "log_path": "artifacts/smoke.log",
+                "description": "passed",
+            },
+        ),
+        session,
+    )
+
+
+def _observe_skill_session(
+    trace: runner.SkillTrace, *, available: list[str], invoked: str | None
+) -> None:
+    from claude_agent_sdk import AssistantMessage, SystemMessage, ToolUseBlock
+
+    trace.observe(SystemMessage(subtype="init", data={"skills": available}))
+    if invoked:
+        trace.observe(
+            AssistantMessage(
+                content=[ToolUseBlock(id="toolu_1", name="Skill", input={"skill": invoked})],
+                model="test",
+            )
+        )
+
+
+def _run_smoke_stage(tmp_path: Path, skill: str | None) -> tuple[SmokeTestResult, str]:
+    return asyncio.run(
+        pipeline._run_structured_stage(
+            tmp_path,
+            stage="configuration_audit",
+            prompt="audit",
+            schema=SmokeTestResult,
+            tools=["Read"],
+            assigned_gpu="0",
+            model="test",
+            max_turns=1,
+            max_budget_usd=1,
+            validator=lambda output: None,
+            skill=skill,
+        )
+    )
+
+
+def test_structured_stage_requires_its_skill_before_accepting_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_json(tmp_path / "metadata.json", {"status": "running", "stages": {}})
+    observed: list[dict[str, object]] = []
+    loads = [None, runner.CONFIGURATION_AUDIT_SKILL]
+
+    async def fake_invoke(
+        *, prompt: str, options: object, skill_trace: runner.SkillTrace, **kwargs: object
+    ) -> tuple[object, str | None]:
+        observed.append({"prompt": prompt, "skills": options.skills, "tools": options.allowed_tools})
+        _observe_skill_session(
+            skill_trace,
+            available=[runner.CONFIGURATION_AUDIT_SKILL, "debug"],
+            invoked=loads.pop(0),
+        )
+        return _smoke_success("audit-session")
+
+    monkeypatch.setattr(runner, "_base_options", lambda *args, **kwargs: {})
+    monkeypatch.setattr(runner, "_invoke_agent", fake_invoke)
+    artifact, _ = _run_smoke_stage(tmp_path, runner.CONFIGURATION_AUDIT_SKILL)
+
+    assert artifact.exit_code == 0
+    assert [item["skills"] for item in observed] == [[runner.CONFIGURATION_AUDIT_SKILL]] * 2
+    assert all(item["tools"] == ["Read"] for item in observed)
+    assert "was not loaded with the Skill tool" in str(observed[1]["prompt"])
+    stage = json.loads((tmp_path / "metadata.json").read_text())["stages"]["configuration_audit"]
+    assert stage["skill"] == runner.CONFIGURATION_AUDIT_SKILL
+    assert stage["attempts"] == 2
+
+
+def test_structured_stage_without_skill_hides_all_skills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_json(tmp_path / "metadata.json", {"status": "running", "stages": {}})
+    observed_skills: list[object] = []
+
+    async def fake_invoke(*, options: object, **kwargs: object) -> tuple[object, str | None]:
+        observed_skills.append(options.skills)
+        return _smoke_success("prepare-session")
+
+    monkeypatch.setattr(runner, "_base_options", lambda *args, **kwargs: {})
+    monkeypatch.setattr(runner, "_invoke_agent", fake_invoke)
+    _run_smoke_stage(tmp_path, None)
+
+    assert observed_skills == [[]]
+
+
+def test_structured_stage_fails_fast_when_skill_is_not_discovered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_json(tmp_path / "metadata.json", {"status": "running", "stages": {}})
+    calls = 0
+
+    async def fake_invoke(
+        *, skill_trace: runner.SkillTrace, **kwargs: object
+    ) -> tuple[object, str | None]:
+        nonlocal calls
+        calls += 1
+        _observe_skill_session(skill_trace, available=["debug"], invoked=None)
+        return _smoke_success("audit-session")
+
+    monkeypatch.setattr(runner, "_base_options", lambda *args, **kwargs: {})
+    monkeypatch.setattr(runner, "_invoke_agent", fake_invoke)
+    with pytest.raises(runner.SkillUnavailableError, match="did not discover"):
+        _run_smoke_stage(tmp_path, runner.CONFIGURATION_AUDIT_SKILL)
+
+    assert calls == 1
+    stage = json.loads((tmp_path / "metadata.json").read_text())["stages"]["configuration_audit"]
+    assert stage["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("prompt_name", "skill"),
+    [
+        ("audit_configuration.md", runner.CONFIGURATION_AUDIT_SKILL),
+        ("repair_execution.md", runner.EXECUTION_REPAIR_SKILL),
+        ("finalize.md", runner.RESULT_COMPARISON_SKILL),
+    ],
+)
+def test_skill_backed_prompts_name_their_skill(prompt_name: str, skill: str) -> None:
+    prompt = runner._render_prompt(prompt_name, {"SKILL": skill})
+    assert f"invoke the `{skill}` skill with the Skill tool" in prompt
+
+
 def test_execution_loop_repairs_failure_then_succeeds_and_archives(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

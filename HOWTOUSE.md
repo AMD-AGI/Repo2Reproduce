@@ -189,6 +189,7 @@ paper/paper.pdf
 paper/paper.md
 paper/paper_parse.json
 workspace/repo/
+workspace/.claude/skills/
 target.json
 configuration_audit.json
 environment_manifest.json
@@ -233,3 +234,24 @@ Lengthy details remain in separate files:
 post-execution reporting agent from frozen evidence. Python protects frozen values and
 checks report structure and assumption coverage, but does not reinterpret the scientific
 comparison.
+
+## 9. Stage prompts and skills
+
+Stage prompts in `repo2reproduce/prompts/` supply run-specific paths, frozen values,
+stage boundaries, and output contracts. Reusable, paper-independent reasoning lives in
+Claude Code skills under `repo2reproduce/skills/`:
+
+| Stage | Skill |
+| --- | --- |
+| Configuration audit | `configuration-audit` |
+| Execution repair | `execution-repair` |
+| Finalization | `paper-result-comparison` |
+
+Target selection and environment preparation use prompts only.
+
+Every run installs the packaged skills into `workspace/.claude/skills/` and records each
+skill's SHA-256 under `skills` in `metadata.json`; recovery reinstalls them from the
+package. Each stage enables only its own skill through the SDK `skills` option, and
+prompt-only stages run with no skills listed. A stage fails immediately when Claude Code
+does not discover its skill, and its output is accepted only after the agent has loaded
+the skill with the Skill tool; otherwise the agent gets one correction request.

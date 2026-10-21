@@ -4,17 +4,42 @@ import argparse
 import asyncio
 import hashlib
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from claude_agent_sdk import (
+    AssistantMessage,
+    SystemMessage,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
 from pydantic import ValidationError
 
 from repo2reproduce import runner
 from repo2reproduce.executor import execute_manifest
 from repo2reproduce.runner import initialize_run
 from repo2reproduce.schemas import ExecutionManifest, FinalReport
+
+PACKAGED_SKILLS = {
+    runner.CONFIGURATION_AUDIT_SKILL,
+    runner.EXECUTION_REPAIR_SKILL,
+    runner.RESULT_COMPARISON_SKILL,
+}
+
+
+def _skill_messages(skill: str, *, tool_use_id: str = "toolu_skill") -> list[object]:
+    return [
+        SystemMessage(subtype="init", data={"session_id": "s", "skills": sorted(PACKAGED_SKILLS)}),
+        AssistantMessage(
+            content=[ToolUseBlock(id=tool_use_id, name="Skill", input={"skill": skill})],
+            model="test",
+        ),
+        UserMessage(content=[ToolResultBlock(tool_use_id=tool_use_id, content="Launching")]),
+    ]
 
 
 def _manifest(script: Path, **updates: object) -> ExecutionManifest:
@@ -131,6 +156,79 @@ def test_initialize_run_installs_isolation_files(tmp_path: Path) -> None:
     )
     hook_command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     assert str(run_dir / "workspace" / ".claude" / "hooks" / "enforce_bash.py") in hook_command
+
+    skills_root = run_dir / "workspace" / ".claude" / "skills"
+    metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert set(metadata["skills"]) == PACKAGED_SKILLS
+    for name in PACKAGED_SKILLS:
+        installed = skills_root / name / "SKILL.md"
+        packaged = runner.SKILLS_DIR / name / "SKILL.md"
+        assert installed.read_bytes() == packaged.read_bytes()
+        assert len(metadata["skills"][name]) == 64
+
+
+def test_install_skills_replaces_stale_skill_files(tmp_path: Path) -> None:
+    stale = tmp_path / "workspace" / ".claude" / "skills" / runner.EXECUTION_REPAIR_SKILL
+    stale.mkdir(parents=True)
+    (stale / "SKILL.md").write_text("outdated", encoding="utf-8")
+    (stale / "removed-reference.md").write_text("outdated", encoding="utf-8")
+
+    first = runner.install_skills(tmp_path)
+    second = runner.install_skills(tmp_path)
+
+    assert first == second
+    assert not (stale / "removed-reference.md").exists()
+    assert (stale / "SKILL.md").read_bytes() == (
+        runner.SKILLS_DIR / runner.EXECUTION_REPAIR_SKILL / "SKILL.md"
+    ).read_bytes()
+
+
+@pytest.mark.parametrize("name", sorted(PACKAGED_SKILLS))
+def test_packaged_skill_frontmatter_and_references(name: str) -> None:
+    text = (runner.SKILLS_DIR / name / "SKILL.md").read_text(encoding="utf-8")
+    _, frontmatter, body = text.split("---", 2)
+    fields = dict(
+        line.split(": ", 1) for line in frontmatter.strip().splitlines() if ": " in line
+    )
+    assert fields["name"] == name
+    assert 0 < len(fields["description"]) <= 1024
+    for reference in re.findall(r"\]\(([^)]+\.md)\)", body):
+        assert (runner.SKILLS_DIR / name / reference).is_file()
+
+
+def test_skill_trace_counts_only_successful_skill_requests() -> None:
+    trace = runner.SkillTrace()
+    for message in _skill_messages(runner.EXECUTION_REPAIR_SKILL):
+        trace.observe(message)
+    trace.observe(
+        AssistantMessage(
+            content=[ToolUseBlock(id="denied", name="Skill", input={"skill": "debug"})],
+            model="test",
+        )
+    )
+    trace.observe(
+        UserMessage(content=[ToolResultBlock(tool_use_id="denied", is_error=True)])
+    )
+
+    assert trace.available == PACKAGED_SKILLS
+    assert trace.invoked == {runner.EXECUTION_REPAIR_SKILL}
+    runner.require_skill_invoked(runner.EXECUTION_REPAIR_SKILL, trace)
+    with pytest.raises(runner.StageValidationError, match="debug"):
+        runner.require_skill_invoked("debug", trace)
+    with pytest.raises(runner.SkillUnavailableError, match="debug"):
+        runner.require_skill_available("finalization", "debug", trace)
+
+
+def test_finalize_prompt_names_skill_and_tolerance() -> None:
+    prompt = runner._render_prompt(
+        "finalize.md",
+        {
+            "SKILL": runner.RESULT_COMPARISON_SKILL,
+            "MATCH_TOLERANCE_PERCENT": str(runner.MATCH_TOLERANCE_PERCENT),
+        },
+    )
+    assert f"invoke the `{runner.RESULT_COMPARISON_SKILL}` skill" in prompt
+    assert "at most 5 percent" in prompt
 
 
 def test_project_environment_loads_repository_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -375,15 +473,23 @@ def test_final_report_schema_failure_gets_one_correction_retry(
         return {}
 
     async def fake_invoke(
-        *, prompt: str, options: object, stage: str, **kwargs: object
+        *,
+        prompt: str,
+        options: object,
+        stage: str,
+        skill_trace: runner.SkillTrace,
+        **kwargs: object,
     ) -> tuple[object, str | None]:
         observed.append(
             {
                 "prompt": prompt,
                 "resume": getattr(options, "resume", None),
                 "stage": stage,
+                "skills": getattr(options, "skills", None),
             }
         )
+        for message in _skill_messages(runner.RESULT_COMPARISON_SKILL):
+            skill_trace.observe(message)
         return responses.pop(0)
 
     monkeypatch.setattr(runner, "_base_options", fake_options)
@@ -401,6 +507,7 @@ def test_final_report_schema_failure_gets_one_correction_retry(
 
     assert report.comparison.verdict == "match"
     assert [item["stage"] for item in observed] == ["finalize-1", "finalize-2"]
+    assert observed[0]["skills"] == [runner.RESULT_COMPARISON_SKILL]
     assert observed[0]["resume"] is None
     assert observed[1]["resume"] == "finalize-session"
     assert "failed the required output schema" in str(observed[1]["prompt"])
