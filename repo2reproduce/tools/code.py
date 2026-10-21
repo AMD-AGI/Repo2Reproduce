@@ -67,6 +67,9 @@ def clone_repo(repo_url: str, dest: Path, depth: int = 1) -> dict[str, Any]:
             raise FileNotFoundError(f"GitHub tree subdirectory not found after clone: {subpath}")
         shutil.copytree(source, dest)
         commit = repo.head.commit.hexsha
+    snapshot_commit = snapshot_repository(
+        dest, f"Pristine snapshot of {clone_url}@{commit}:{subpath}"
+    )
     return {
         "path": str(dest),
         "already_present": False,
@@ -74,7 +77,29 @@ def clone_repo(repo_url: str, dest: Path, depth: int = 1) -> dict[str, Any]:
         "branch": branch,
         "subpath": subpath,
         "commit": commit,
+        "snapshot_commit": snapshot_commit,
     }
+
+
+def snapshot_repository(path: Path, message: str) -> str:
+    """Make ``path`` its own git repository whose single commit is its current tree.
+
+    A subtree copied out of an upstream clone has no history of its own; this local
+    baseline lets later stages diff their changes against the pristine upstream files.
+    """
+    from git import Repo
+
+    repo = Repo.init(str(path))
+    repo.git.add("--all", "--force")
+    identity = {
+        "GIT_AUTHOR_NAME": "Repo2Reproduce",
+        "GIT_AUTHOR_EMAIL": "repo2reproduce@localhost",
+        "GIT_COMMITTER_NAME": "Repo2Reproduce",
+        "GIT_COMMITTER_EMAIL": "repo2reproduce@localhost",
+    }
+    with repo.git.custom_environment(**identity):
+        repo.git.commit("--quiet", "--no-verify", "--no-gpg-sign", "--message", message)
+    return repo.head.commit.hexsha
 
 
 # --------------------------------------------------------------------------- #

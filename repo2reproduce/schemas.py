@@ -476,6 +476,11 @@ class RepositoryPatchEvidence(BaseModel):
     """Complete repository diff against the pinned base commit after a repair."""
 
     base_commit: str
+    local_baseline_commit: str | None = Field(
+        default=None,
+        description="Local commit holding the pristine upstream files: base_commit for "
+        "full clones, a local snapshot commit for subtree clones.",
+    )
     diff_path: str
     diff_sha256: str
     changed_files: list[str] = Field(default_factory=list)

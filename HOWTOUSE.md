@@ -211,7 +211,15 @@ metric extractor, and hashes used by deterministic execution.
 When a failed execution is repaired, `execution_repairs/repair-N.json` records the
 diagnosis, changed-file hashes, smoke evidence, and repository patch evidence. Failed
 results, executor logs, and full-run outputs are archived under
-`artifacts/execution-attempts/attempt-N/` before retrying.
+`artifacts/execution-attempts/attempt-N/` before retrying. Because containers write
+`artifacts/full-run` as root, it is archived by renaming it to
+`artifacts/full-run.attempt-N`, and `attempt-N/full-run` links to it.
+
+Repository diffs are taken against a local baseline commit. When the repository URL names
+a subdirectory (`.../tree/<branch>/<path>`), bootstrap makes that subtree its own git
+repository with one commit holding the pristine upstream files, recorded as
+`clone.snapshot_commit` in `bootstrap.json`. Recovering an older subtree run rebuilds this
+baseline from a fresh clone of the same upstream commit.
 
 ## 8. Final report and evidence
 

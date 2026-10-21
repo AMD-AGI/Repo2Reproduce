@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +30,7 @@ from repo2reproduce.schemas import (
     SmokeTestResult,
     TargetContract,
 )
+from repo2reproduce.tools import code as code_io
 from repo2reproduce.validators import (
     StageValidationError,
     sha256_file,
@@ -912,6 +914,87 @@ def test_structured_stage_fails_fast_when_skill_is_not_discovered(
     assert stage["status"] == "failed"
 
 
+def _subtree_run(tmp_path: Path, *, snapshot: bool) -> tuple[Path, ConfigurationAudit]:
+    parent_checkout = tmp_path / "checkout"
+    parent_checkout.mkdir()
+    (parent_checkout / "README.md").write_text("orchestrator checkout\n", encoding="utf-8")
+    code_io.snapshot_repository(parent_checkout, "parent checkout")
+    run_dir = parent_checkout / "runs" / "run-1"
+    _paper(run_dir)
+    _repository(run_dir)
+    target = _target(run_dir)
+    audit = _audit(run_dir, target)
+    clone = {"subpath": "project", "commit": audit.repository_commit}
+    if snapshot:
+        clone["snapshot_commit"] = code_io.snapshot_repository(
+            run_dir / "workspace" / "repo", "pristine subtree"
+        )
+    _write_json(
+        run_dir / "bootstrap.json",
+        {"repository_path": "repo", "repository_commit": audit.repository_commit, "clone": clone},
+    )
+    return run_dir, audit
+
+
+def test_subtree_patch_is_diffed_against_its_local_snapshot(tmp_path: Path) -> None:
+    run_dir, audit = _subtree_run(tmp_path, snapshot=True)
+    repository = run_dir / "workspace" / "repo"
+    (repository / "run.py").write_text('DATASET = "DemoSet"\n', encoding="utf-8")
+    (repository / "compat.py").write_text("SHIM = True\n", encoding="utf-8")
+
+    patch_path, patch_sha, changed = pipeline._capture_repository_patch(run_dir, audit, 1)
+
+    patch = (run_dir / patch_path).read_text(encoding="utf-8")
+    assert changed == ["compat.py", "run.py"]
+    assert "-def median_accuracy(values):" in patch
+    assert "+SHIM = True" in patch
+    assert "README.md" not in patch
+    assert patch_sha == sha256_file(run_dir / patch_path)
+    snapshot = json.loads((run_dir / "bootstrap.json").read_text())["clone"]["snapshot_commit"]
+    assert pipeline._repository_baseline(run_dir, audit) == snapshot
+
+
+def test_patch_capture_refuses_a_parent_checkout(tmp_path: Path) -> None:
+    run_dir, audit = _subtree_run(tmp_path, snapshot=False)
+    with pytest.raises(StageValidationError, match="not its own git checkout"):
+        pipeline._capture_repository_patch(run_dir, audit, 1)
+
+
+@pytest.mark.parametrize(
+    ("upstream_commit", "origin"),
+    [("abc123", "pristine_upstream"), ("moved", "workspace_at_recovery")],
+)
+def test_legacy_subtree_run_gets_a_repository_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    upstream_commit: str,
+    origin: str,
+) -> None:
+    run_dir, audit = _subtree_run(tmp_path, snapshot=False)
+    repository = run_dir / "workspace" / "repo"
+    pristine_source = (repository / "run.py").read_text(encoding="utf-8")
+    (repository / "run.py").write_text("PREPARED = True\n", encoding="utf-8")
+
+    def fake_clone(repo_url: str, dest: Path) -> dict:
+        dest.mkdir(parents=True)
+        (dest / "run.py").write_text(pristine_source, encoding="utf-8")
+        return {
+            "commit": upstream_commit,
+            "snapshot_commit": code_io.snapshot_repository(dest, "pristine subtree"),
+        }
+
+    monkeypatch.setattr(code_io, "clone_repo", fake_clone)
+    bootstrap = json.loads((run_dir / "bootstrap.json").read_text())
+    assert pipeline._needs_repository_baseline(bootstrap)
+    restored = pipeline._restore_repository_baseline(run_dir, bootstrap, "https://example")
+    _write_json(run_dir / "bootstrap.json", restored)
+
+    assert restored["clone"]["snapshot_origin"] == origin
+    assert not pipeline._needs_repository_baseline(restored)
+    _, _, changed = pipeline._capture_repository_patch(run_dir, audit, 1)
+    assert changed == (["run.py"] if origin == "pristine_upstream" else [])
+
+
 @pytest.mark.parametrize(
     ("prompt_name", "skill"),
     [
@@ -938,6 +1021,35 @@ def test_execution_loop_repairs_failure_then_succeeds_and_archives(
     assert (archived / "execution_result.json").is_file()
     assert (archived / "executor.log").is_file()
     assert (archived / "full-run" / "metrics.json").is_file()
+    assert (archived / "full-run").resolve() == (
+        tmp_path / "loop-run" / "artifacts" / "full-run.attempt-1"
+    ).resolve()
+    assert not (tmp_path / "loop-run" / "artifacts" / "full-run").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_archive_handles_container_owned_full_run(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    full_run = run_dir / "artifacts" / "full-run"
+    (full_run / "train").mkdir(parents=True)
+    (full_run / "train" / "model.pt").write_text("weights", encoding="utf-8")
+    (run_dir / "logs").mkdir()
+    (run_dir / "logs" / "executor.log").write_text("failed\n", encoding="utf-8")
+    for directory in (full_run / "train", full_run):
+        directory.chmod(0o555)
+    result = _result("failed", "launch command exited with code 1")
+    manifest = SimpleNamespace(expected_outputs=["artifacts/full-run/metrics.json"])
+
+    try:
+        archived = pipeline._archive_execution_attempt(run_dir, result, manifest, 1)
+        assert (archived / "full-run" / "train" / "model.pt").read_text() == "weights"
+        assert not full_run.exists()
+    finally:
+        for name in ("full-run", "full-run.attempt-1"):
+            directory = run_dir / "artifacts" / name
+            if directory.exists():
+                directory.chmod(0o755)
+                (directory / "train").chmod(0o755)
 
 
 def test_execution_loop_stops_after_two_repairs(

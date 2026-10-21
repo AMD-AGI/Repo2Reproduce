@@ -8,6 +8,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -234,6 +235,45 @@ async def _run_structured_stage(
     raise RuntimeError(message)
 
 
+def _needs_repository_baseline(bootstrap: dict[str, Any]) -> bool:
+    clone = bootstrap.get("clone") or {}
+    return bool(clone.get("subpath")) and not clone.get("snapshot_commit")
+
+
+def _restore_repository_baseline(
+    run_dir: Path,
+    bootstrap: dict[str, Any],
+    repo_url: str,
+) -> dict[str, Any]:
+    """Give a subtree clone from an older run its own pristine git baseline.
+
+    The baseline is rebuilt from a fresh clone of the same upstream commit, so files the
+    run already changed still appear in later repository diffs. When the upstream branch
+    has moved, the current tree becomes the baseline and the bootstrap record says so.
+    """
+
+    repository = run_dir / "workspace" / str(bootstrap["repository_path"])
+    clone = dict(bootstrap["clone"])
+    if (repository / ".git").exists():
+        raise RuntimeError(f"repository already has unrecorded git metadata: {repository}")
+    cache = run_dir / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=str(cache)) as temporary:
+        pristine = Path(temporary) / "repo"
+        fresh = code_io.clone_repo(repo_url, pristine)
+        if fresh.get("commit") == bootstrap["repository_commit"]:
+            shutil.move(str(pristine / ".git"), str(repository / ".git"))
+            clone["snapshot_commit"] = fresh["snapshot_commit"]
+            clone["snapshot_origin"] = "pristine_upstream"
+        else:
+            clone["snapshot_commit"] = code_io.snapshot_repository(
+                repository,
+                f"Workspace snapshot at recovery of {bootstrap['repository_commit']}",
+            )
+            clone["snapshot_origin"] = "workspace_at_recovery"
+    return {**bootstrap, "clone": clone}
+
+
 async def bootstrap_sources(
     run_dir: Path,
     *,
@@ -251,8 +291,14 @@ async def bootstrap_sources(
         run_dir / "workspace" / "repo",
     ]
     if bootstrap_path.is_file() and all(path.exists() for path in required):
+        bootstrap = _read_json(bootstrap_path)
+        if _needs_repository_baseline(bootstrap):
+            bootstrap = await asyncio.to_thread(
+                _restore_repository_baseline, run_dir, bootstrap, repo_url
+            )
+            _atomic_json(bootstrap_path, bootstrap)
         _update_stage(run_dir, "bootstrap", "succeeded")
-        return _read_json(bootstrap_path)
+        return bootstrap
 
     _update_stage(run_dir, "bootstrap", "running", increment_attempt=True)
 
@@ -738,6 +784,21 @@ def _git_output(repository: Path, *arguments: str) -> str:
     return completed.stdout
 
 
+def _repository_baseline(run_dir: Path, audit: ConfigurationAudit) -> str:
+    """Return the local commit that holds the pristine upstream repository files.
+
+    Full clones check out the upstream commit itself; subtree clones carry a local
+    snapshot commit of the upstream subtree instead.
+    """
+
+    bootstrap_path = run_dir / "bootstrap.json"
+    if bootstrap_path.is_file():
+        snapshot = (_read_json(bootstrap_path).get("clone") or {}).get("snapshot_commit")
+        if snapshot:
+            return str(snapshot)
+    return audit.repository_commit
+
+
 def _capture_repository_patch(
     run_dir: Path,
     audit: ConfigurationAudit,
@@ -746,8 +807,14 @@ def _capture_repository_patch(
     """Persist the complete tracked and untracked repository diff."""
 
     repository = run_dir / "workspace" / audit.repository_path
+    toplevel = _git_output(repository, "rev-parse", "--show-toplevel").strip()
+    if Path(toplevel).resolve() != repository.resolve():
+        raise StageValidationError(
+            f"repository is not its own git checkout (git resolved {toplevel})"
+        )
+    baseline = _repository_baseline(run_dir, audit)
     head = _git_output(repository, "rev-parse", "HEAD").strip()
-    if head != audit.repository_commit:
+    if head != baseline:
         raise StageValidationError("repair changed the checked-out repository base commit")
 
     status = _git_output(repository, "status", "--porcelain=v1", "--untracked-files=all")
@@ -763,7 +830,7 @@ def _capture_repository_patch(
         if line.startswith("?? "):
             untracked.append(value)
 
-    tracked_patch = _git_output(repository, "diff", "--binary", audit.repository_commit, "--", ".")
+    tracked_patch = _git_output(repository, "diff", "--binary", baseline, "--", ".")
     patch_parts = [tracked_patch]
     for relative in untracked:
         candidate = repository / relative
@@ -809,7 +876,11 @@ def _archive_execution_attempt(
 
     full_run = run_dir / "artifacts" / "full-run"
     if full_run.exists():
-        shutil.move(str(full_run), str(destination / "full-run"))
+        # Containers write full-run as root. The host may rename a directory it cannot
+        # write only within the same parent, so archive it as a sibling and link to it.
+        archived_full_run = full_run.with_name(f"full-run.attempt-{attempt}")
+        full_run.rename(archived_full_run)
+        (destination / "full-run").symlink_to(Path("..") / ".." / archived_full_run.name)
     for relative in manifest.expected_outputs:
         output = run_dir / relative
         if not output.exists():
@@ -971,6 +1042,7 @@ async def repair_execution(
         patch_path, patch_sha, changed_files = _capture_repository_patch(run_dir, audit, attempt)
         repair["repository_patch"] = {
             "base_commit": audit.repository_commit,
+            "local_baseline_commit": _repository_baseline(run_dir, audit),
             "diff_path": patch_path,
             "diff_sha256": patch_sha,
             "changed_files": changed_files,
