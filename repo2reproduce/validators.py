@@ -14,6 +14,7 @@ from .schemas import (
     ConfigurationAudit,
     EnvironmentManifest,
     ExecutionManifest,
+    ExecutionRepairOutput,
     ExecutionResult,
     FinalReport,
     PaperEvidence,
@@ -254,8 +255,87 @@ def validate_preparation(
         raise StageValidationError("; ".join(errors))
 
 
-def validate_final_report(
+def validate_execution_repair(
+    run_dir: Path,
     target: TargetContract,
+    audit: ConfigurationAudit,
+    previous_manifest: ExecutionManifest,
+    output: ExecutionRepairOutput,
+    *,
+    attempt: int,
+    failure_fingerprint: str,
+    target_sha256: str,
+    audit_sha256: str,
+) -> None:
+    """Reject repairs that alter frozen science or lack concrete repair evidence."""
+
+    repair = output.repair
+    errors: list[str] = []
+    if repair.attempt != attempt:
+        errors.append(f"repair attempt must be {attempt}")
+    if repair.failure_fingerprint != failure_fingerprint:
+        errors.append("repair failure fingerprint differs from the Python-owned fingerprint")
+    if sha256_file(run_dir / "target.json") != target_sha256:
+        errors.append("repair modified immutable target.json")
+    if sha256_file(run_dir / "configuration_audit.json") != audit_sha256:
+        errors.append("repair modified immutable configuration_audit.json")
+
+    environment = output.environment
+    manifest = output.manifest
+    if environment.status != "ready" or manifest.status != "ready":
+        errors.append("execution repair must return ready environment and execution manifests")
+    if manifest.selected_experiment != target.selected_experiment:
+        errors.append("repair changed the selected experiment")
+    if manifest.metric_name != target.metric_name:
+        errors.append("repair changed the target metric")
+    if manifest.paper_target_value != target.metric_value:
+        errors.append("repair changed the paper target value")
+    if manifest.repository_commit != audit.repository_commit:
+        errors.append("repair changed the pinned repository commit")
+
+    before_values = {
+        item.audit_item_id: item.value for item in previous_manifest.scientific_configuration
+    }
+    after_values = {item.audit_item_id: item.value for item in manifest.scientific_configuration}
+    if after_values != before_values:
+        errors.append("repair changed immutable scientific configuration values")
+
+    if not repair.changes:
+        errors.append("repair made no evidenced file changes")
+    for change in repair.changes:
+        if change.path in {"target.json", "configuration_audit.json"}:
+            errors.append(f"repair cannot change immutable artifact: {change.path}")
+            continue
+        path = run_dir / change.path
+        if not path.is_file():
+            errors.append(f"repair evidence file is missing: {change.path}")
+        elif not change.sha256 or sha256_file(path) != change.sha256:
+            errors.append(f"repair file hash does not match: {change.path}")
+
+    smoke = repair.smoke_test
+    smoke_log = run_dir / smoke.log_path
+    if smoke.exit_code != 0:
+        errors.append("repair smoke test did not succeed")
+    if not smoke_log.is_file() or smoke_log.stat().st_size == 0:
+        errors.append("repair smoke-test log is missing or empty")
+
+    patch = repair.repository_patch
+    patch_path = run_dir / patch.diff_path
+    if patch.base_commit != audit.repository_commit:
+        errors.append("repository patch is not based on the pinned commit")
+    if not patch_path.is_file() or sha256_file(patch_path) != patch.diff_sha256:
+        errors.append("repository patch evidence is missing or has the wrong hash")
+
+    if errors:
+        raise StageValidationError("; ".join(errors))
+
+
+def validate_final_report(
+    run_dir: Path,
+    target: TargetContract,
+    audit: ConfigurationAudit,
+    environment: EnvironmentManifest,
+    manifest: ExecutionManifest,
     result: ExecutionResult,
     report: FinalReport,
 ) -> None:
@@ -268,13 +348,66 @@ def validate_final_report(
         errors.append("final report metric differs from target")
     if report.paper_target_value != target.metric_value:
         errors.append("final report paper value differs from target")
+    if report.result_location.description != target.result_location:
+        errors.append("final report paper location differs from target")
     if report.execution_status != result.status:
         errors.append("final report execution status differs from execution result")
     if report.achieved_value != result.achieved_metric:
         errors.append("final report achieved value differs from deterministic extraction")
     if (result.status != "succeeded" or result.achieved_metric is None) and (
-        report.comparable or report.match is not None
+        report.comparison.comparable
+        or report.comparison.verdict in {"match", "miss"}
     ):
         errors.append("final report claims comparability without a successful extracted metric")
+
+    report_paths = report.artifacts
+    expected_paths = {
+        "configuration_used": "execution_manifest.json",
+        "configuration_audit": "configuration_audit.json",
+        "environment_manifest": "environment_manifest.json",
+        "dockerfile": environment.dockerfile,
+        "build_log": environment.build_log_path,
+        "launch_script": manifest.launch_script,
+        "execution_result": "execution_result.json",
+        "metric_artifact": result.metric_source or manifest.metric_artifact,
+        "assumptions": "assumptions.json",
+    }
+    log_path = Path(result.log_path)
+    if log_path.is_absolute():
+        try:
+            expected_executor_log = log_path.resolve().relative_to(run_dir.resolve()).as_posix()
+        except ValueError:
+            expected_executor_log = "logs/executor.log"
+    else:
+        expected_executor_log = log_path.as_posix()
+    expected_paths["executor_log"] = expected_executor_log
+    for field_name, expected in expected_paths.items():
+        if getattr(report_paths, field_name) != expected:
+            errors.append(f"final report {field_name} path differs from its manifest")
+    if report_paths.launch_script_sha256 != manifest.launch_script_sha256:
+        errors.append("final report launch script hash differs from execution manifest")
+
+    audit_ids = {item.id for item in audit.configuration}
+    assumption_audit_ids = {
+        audit_item_id
+        for assumption in report.assumptions
+        for audit_item_id in assumption.audit_item_ids
+    }
+    unknown_assumption_ids = sorted(assumption_audit_ids - audit_ids)
+    if unknown_assumption_ids:
+        errors.append(
+            "final report assumptions reference unknown audit items: "
+            + ", ".join(unknown_assumption_ids)
+        )
+    missing_fallbacks = sorted(
+        item.id
+        for item in audit.configuration
+        if item.finding == "paper_missing" and item.id not in assumption_audit_ids
+    )
+    if missing_fallbacks:
+        errors.append(
+            "final report omitted paper-missing assumptions: "
+            + ", ".join(missing_fallbacks)
+        )
     if errors:
         raise StageValidationError("; ".join(errors))

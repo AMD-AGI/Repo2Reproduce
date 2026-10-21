@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,7 +14,7 @@ from pydantic import ValidationError
 from repo2reproduce import runner
 from repo2reproduce.executor import execute_manifest
 from repo2reproduce.runner import initialize_run
-from repo2reproduce.schemas import ExecutionManifest
+from repo2reproduce.schemas import ExecutionManifest, FinalReport
 
 
 def _manifest(script: Path, **updates: object) -> ExecutionManifest:
@@ -144,6 +145,21 @@ def test_project_environment_loads_repository_dotenv(monkeypatch: pytest.MonkeyP
     assert observed == {"path": runner.PACKAGE_DIR.parent / ".env", "override": False}
 
 
+def test_execution_repair_cli_defaults_to_two_and_allows_zero() -> None:
+    parser = runner.build_parser()
+    default = parser.parse_args(["paper.pdf", "https://github.com/example/repo"])
+    disabled = parser.parse_args(
+        [
+            "paper.pdf",
+            "https://github.com/example/repo",
+            "--max-execution-repairs",
+            "0",
+        ]
+    )
+    assert default.max_execution_repairs == 2
+    assert disabled.max_execution_repairs == 0
+
+
 def test_executor_waits_and_records_success(tmp_path: Path) -> None:
     run_dir, script = _prepared_run(tmp_path)
     manifest = _manifest(script)
@@ -237,3 +253,222 @@ def test_recovery_delegates_to_staged_pipeline_without_saved_session(
     metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["status"] == "recovering"
     assert "session_id" not in metadata
+
+
+def test_final_report_renderer_links_authoritative_evidence_files() -> None:
+    report = FinalReport.model_validate(
+        {
+            "selected_experiment": "Table 1 / DemoSet / proposed method",
+            "result_location": {
+                "description": "Table 1, proposed method row, DemoSet column",
+                "table_or_figure": "Table 1",
+                "row": "proposed method",
+                "column": "DemoSet",
+                "cell": "accuracy",
+            },
+            "execution_status": "succeeded",
+            "metric_name": "accuracy",
+            "paper_target_value": "0.90",
+            "achieved_value": "0.91",
+            "baseline": {
+                "applicable": True,
+                "method": "Prior method",
+                "value": "0.80",
+                "metric_direction": "higher_is_better",
+                "paper_evidence": {
+                    "quote": "The prior method obtains an accuracy of 0.80.",
+                    "locator": "p.4, Table 1",
+                },
+                "applicability_explanation": "Same dataset and evaluation protocol.",
+            },
+            "comparison": {
+                "comparable": True,
+                "calculation": "abs(0.91 - 0.90) / 0.90 * 100",
+                "relative_error_percent": 1.111111,
+                "baseline_advantage_preserved": True,
+                "verdict": "match",
+                "explanation": "Within five percent and above the baseline.",
+            },
+            "artifacts": {
+                "dockerfile": "workspace/execution/Dockerfile",
+                "build_log": "artifacts/env/build.log",
+                "launch_script": "workspace/execution/launch.sh",
+                "launch_script_sha256": "0" * 64,
+                "metric_artifact": "artifacts/full-run/metric.json",
+            },
+            "assumptions": [
+                {
+                    "id": "A1",
+                    "category": "config",
+                    "setting": "batch size",
+                    "value_used": "64",
+                    "paper_status": "not_specified",
+                    "source_type": "code_default",
+                    "source_path": "config.py",
+                    "audit_item_ids": ["batch-size"],
+                    "rationale": "The official entrypoint uses this default.",
+                    "impact": "May affect optimization.",
+                }
+            ],
+        }
+    )
+
+    markdown = runner._render_final_report(report)
+
+    assert "**Paper location:** Table 1, proposed method row, DemoSet column" in markdown
+    assert "**Verdict:** match" in markdown
+    assert "**Configuration used:** `execution_manifest.json`" in markdown
+    assert "**Scientific launch script:** `workspace/execution/launch.sh`" in markdown
+    assert "**[config] A1 — batch size:** 64" in markdown
+
+
+def test_final_report_schema_failure_gets_one_correction_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "logs").mkdir()
+    observed: list[dict[str, object]] = []
+    valid_report = {
+        "selected_experiment": "interval experiment",
+        "result_location": {"description": "Figure 2c"},
+        "execution_status": "succeeded",
+        "metric_name": "certified interval",
+        "paper_target_value": "(0.25, 0.30]",
+        "achieved_value": "(0.25, 0.30]",
+        "baseline": {
+            "applicable": False,
+            "metric_direction": "higher_is_better",
+            "applicability_explanation": "No claim-aligned baseline applies.",
+        },
+        "comparison": {
+            "comparable": True,
+            "calculation": "The reproduced interval equals the paper interval.",
+            "relative_error_percent": None,
+            "baseline_advantage_preserved": None,
+            "verdict": "match",
+            "explanation": "The intervals are identical.",
+        },
+    }
+    responses = [
+        (
+            SimpleNamespace(
+                is_error=True,
+                result="baseline field failed schema validation",
+                errors=[],
+                subtype="error",
+                structured_output=None,
+            ),
+            "finalize-session",
+        ),
+        (
+            SimpleNamespace(
+                is_error=False,
+                result=None,
+                errors=[],
+                subtype="success",
+                structured_output=valid_report,
+            ),
+            "finalize-session",
+        ),
+    ]
+
+    def fake_options(*args: object, **kwargs: object) -> dict:
+        return {}
+
+    async def fake_invoke(
+        *, prompt: str, options: object, stage: str, **kwargs: object
+    ) -> tuple[object, str | None]:
+        observed.append(
+            {
+                "prompt": prompt,
+                "resume": getattr(options, "resume", None),
+                "stage": stage,
+            }
+        )
+        return responses.pop(0)
+
+    monkeypatch.setattr(runner, "_base_options", fake_options)
+    monkeypatch.setattr(runner, "_invoke_agent", fake_invoke)
+    report = asyncio.run(
+        runner._request_final_report(
+            tmp_path,
+            prompt="Read the frozen evidence and report.",
+            assigned_gpu="0",
+            model="test",
+            max_turns=5,
+            max_budget_usd=1,
+        )
+    )
+
+    assert report.comparison.verdict == "match"
+    assert [item["stage"] for item in observed] == ["finalize-1", "finalize-2"]
+    assert observed[0]["resume"] is None
+    assert observed[1]["resume"] == "finalize-session"
+    assert "failed the required output schema" in str(observed[1]["prompt"])
+    assert "do not launch or repeat the experiment" in str(observed[1]["prompt"])
+
+
+@pytest.mark.parametrize(
+    ("verdict", "execution_status", "comparable"),
+    [
+        ("match", "succeeded", True),
+        ("miss", "succeeded", True),
+        ("run_incomplete", "failed", False),
+        ("needs_review", "succeeded", False),
+    ],
+)
+def test_final_report_supports_every_verdict(
+    verdict: str,
+    execution_status: str,
+    comparable: bool,
+) -> None:
+    report = FinalReport.model_validate(
+        {
+            "selected_experiment": "interval experiment",
+            "result_location": {"description": "Table 2, interval row"},
+            "execution_status": execution_status,
+            "metric_name": "certified interval",
+            "paper_target_value": "(0.15, 0.20]",
+            "achieved_value": "(0.15, 0.20]" if execution_status == "succeeded" else None,
+            "baseline": {
+                "applicable": False,
+                "metric_direction": "not_applicable",
+                "applicability_explanation": "The paper reports no comparable baseline.",
+            },
+            "comparison": {
+                "comparable": comparable,
+                "calculation": "Interval membership/equality; relative error is not meaningful.",
+                "relative_error_percent": None,
+                "verdict": verdict,
+                "explanation": "Structured verdict fixture.",
+            },
+        }
+    )
+
+    assert report.comparison.verdict == verdict
+
+
+def test_non_applicable_baseline_can_retain_metric_direction() -> None:
+    report = FinalReport.model_validate(
+        {
+            "selected_experiment": "FLOPs measurement",
+            "result_location": {"description": "Table 2, FLOPs row"},
+            "execution_status": "failed",
+            "metric_name": "Inference FLOPs",
+            "paper_target_value": "8.83e6",
+            "achieved_value": None,
+            "baseline": {
+                "applicable": False,
+                "metric_direction": "lower_is_better",
+                "applicability_explanation": "No claim-aligned baseline applies.",
+            },
+            "comparison": {
+                "comparable": False,
+                "calculation": "No metric was produced.",
+                "relative_error_percent": None,
+                "verdict": "run_incomplete",
+                "explanation": "Execution failed before metric extraction.",
+            },
+        }
+    )
+
+    assert report.baseline.metric_direction == "lower_is_better"

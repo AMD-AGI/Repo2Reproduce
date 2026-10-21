@@ -6,6 +6,7 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,7 @@ from repo2reproduce.schemas import (
     EnvironmentManifest,
     ExecutionManifest,
     ExecutionPathStep,
+    ExecutionRepairOutput,
     ExecutionResult,
     FinalReport,
     PaperEvidence,
@@ -24,12 +26,14 @@ from repo2reproduce.schemas import (
     ResolvedInput,
     ScientificConfigurationItem,
     ScientificRequirement,
+    SmokeTestResult,
     TargetContract,
 )
 from repo2reproduce.validators import (
     StageValidationError,
     sha256_file,
     validate_audit,
+    validate_execution_repair,
     validate_final_report,
     validate_preparation,
     validate_target,
@@ -174,6 +178,50 @@ def _resolved_inputs() -> list[ResolvedInput]:
             delivery="hardcoded",
         ),
     ]
+
+
+def _final_report(
+    target: TargetContract,
+    result: ExecutionResult,
+    *,
+    achieved_value: str | None = None,
+    assumptions: list[dict] | None = None,
+) -> FinalReport:
+    return FinalReport.model_validate(
+        {
+            "selected_experiment": target.selected_experiment,
+            "result_location": {
+                "description": target.result_location,
+                "table_or_figure": "Table 1",
+                "row": "proposed method",
+                "column": "DemoSet",
+                "cell": "accuracy",
+            },
+            "execution_status": result.status,
+            "metric_name": target.metric_name,
+            "paper_target_value": target.metric_value,
+            "achieved_value": (
+                result.achieved_metric if achieved_value is None else achieved_value
+            ),
+            "baseline": {
+                "applicable": False,
+                "metric_direction": "not_applicable",
+                "applicability_explanation": "No comparable baseline is reported.",
+            },
+            "comparison": {
+                "comparable": True,
+                "calculation": "abs(0.91 - 0.90) / 0.90 * 100",
+                "relative_error_percent": 1.111111,
+                "baseline_advantage_preserved": None,
+                "verdict": "match",
+                "explanation": "The completed result is within five percent.",
+            },
+            "artifacts": {
+                "metric_artifact": result.metric_source,
+            },
+            "assumptions": assumptions or [],
+        }
+    )
 
 
 def _repository(run_dir: Path) -> None:
@@ -525,9 +573,381 @@ def test_recovery_rerun_always_regenerates_stale_report(
     ) == "stale report\n"
 
 
+def _exercise_execution_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    results: list[ExecutionResult],
+    *,
+    max_repairs: int = 2,
+    repair_error: Exception | None = None,
+) -> tuple[int, int, int, ExecutionResult]:
+    run_dir = tmp_path / "loop-run"
+    _paper(run_dir)
+    _repository(run_dir)
+    target = _target(run_dir)
+    audit = _audit(run_dir, target)
+    _write_json(run_dir / "configuration_audit.json", audit.model_dump(mode="json"))
+    _write_json(
+        run_dir / "input.json",
+        {
+            "paper_url": "https://example.test/paper.pdf",
+            "repo_url": "https://github.com/example/repo",
+            "timeout_seconds": 60,
+            "target": None,
+        },
+    )
+    _write_json(
+        run_dir / "metadata.json",
+        {
+            "status": "initialized",
+            "assigned_physical_gpu": "0",
+            "model": "test-model",
+            "stages": {},
+        },
+    )
+    (run_dir / "logs").mkdir()
+    (run_dir / "artifacts").mkdir()
+    _write_json(run_dir / "execution_manifest.json", {"fixture": True})
+
+    environment = EnvironmentManifest(
+        status="ready",
+        image_tag="demo:test",
+        dockerfile="workspace/Dockerfile",
+        dockerfile_sha256="0" * 64,
+        build_log_path="artifacts/build.log",
+        build_succeeded=True,
+    )
+    manifest = ExecutionManifest(
+        schema_version=1,
+        status="ready",
+        selected_experiment=target.selected_experiment,
+        image_tag="demo:test",
+        launch_script="workspace/launch.sh",
+        launch_script_sha256="0" * 64,
+        host_repository="workspace/repo",
+        container_repository="/run/workspace/repo",
+        timeout_seconds=60,
+        expected_outputs=["artifacts/full-run/metrics.json"],
+        smoke_test={
+            "exit_code": 0,
+            "log_path": "artifacts/smoke.log",
+            "description": "fixture",
+        },
+    )
+    repair_calls = 0
+    execution_calls = 0
+    final_result: ExecutionResult | None = None
+
+    async def fake_bootstrap(*args: object, **kwargs: object) -> dict:
+        return {"repository_commit": "abc123", "repository_path": "repo"}
+
+    async def fake_target(*args: object, **kwargs: object) -> TargetContract:
+        return target
+
+    async def fake_audit(*args: object, **kwargs: object) -> ConfigurationAudit:
+        return audit
+
+    async def fake_prepare(
+        *args: object, **kwargs: object
+    ) -> tuple[EnvironmentManifest, ExecutionManifest]:
+        return environment, manifest
+
+    def fake_execute(*args: object, **kwargs: object) -> ExecutionResult:
+        nonlocal execution_calls
+        result = results[execution_calls]
+        execution_calls += 1
+        log = run_dir / "logs" / "executor.log"
+        log.write_text((result.error or result.status) + "\n", encoding="utf-8")
+        if result.status == "failed" and execution_calls == 1:
+            stale = run_dir / "artifacts" / "full-run" / "metrics.json"
+            stale.parent.mkdir(parents=True)
+            stale.write_text('{"stale": true}\n', encoding="utf-8")
+        return result
+
+    async def fake_repair(
+        *args: object, **kwargs: object
+    ) -> tuple[EnvironmentManifest, ExecutionManifest, str]:
+        nonlocal repair_calls
+        repair_calls += 1
+        if repair_error is not None:
+            raise repair_error
+        return environment, manifest, "repair-session"
+
+    async def fake_finalize(*args: object, **kwargs: object) -> str:
+        nonlocal final_result
+        final_result = kwargs["execution_result"]
+        (run_dir / "final_report.md").write_text("report\n", encoding="utf-8")
+        return "report"
+
+    monkeypatch.setattr(pipeline, "bootstrap_sources", fake_bootstrap)
+    monkeypatch.setattr(pipeline, "select_target", fake_target)
+    monkeypatch.setattr(pipeline, "audit_configuration", fake_audit)
+    monkeypatch.setattr(pipeline, "prepare_environment", fake_prepare)
+    monkeypatch.setattr(pipeline, "execute_manifest", fake_execute)
+    monkeypatch.setattr(pipeline, "repair_execution", fake_repair)
+    monkeypatch.setattr(runner, "finalize_session", fake_finalize)
+    args = argparse.Namespace(
+        gpu=None,
+        model=None,
+        max_turns=10,
+        max_budget_usd=1.0,
+        max_execution_repairs=max_repairs,
+        prepare_only=False,
+    )
+    exit_code = asyncio.run(pipeline.run_staged_pipeline(run_dir, args))
+    assert final_result is not None
+    return exit_code, repair_calls, execution_calls, final_result
+
+
+def _result(status: str, error: str | None = None) -> ExecutionResult:
+    return ExecutionResult(
+        status=status,
+        command=["run"],
+        exit_code=0 if status == "succeeded" else 1,
+        timed_out=status == "timed_out",
+        duration_seconds=1,
+        log_path="logs/executor.log",
+        expected_outputs=["artifacts/full-run/metrics.json"],
+        missing_outputs=[] if status == "succeeded" else ["artifacts/full-run/metrics.json"],
+        error=error,
+        achieved_metric="0.91" if status == "succeeded" else None,
+    )
+
+
+def test_execution_loop_immediate_success_has_no_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exit_code, repairs, executions, final = _exercise_execution_loop(
+        tmp_path, monkeypatch, [_result("succeeded")]
+    )
+    assert (exit_code, repairs, executions, final.status) == (0, 0, 1, "succeeded")
+
+
+def test_structured_stage_falls_back_when_saved_session_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_json(tmp_path / "metadata.json", {"status": "running", "stages": {}})
+    observed_resumes: list[str | None] = []
+    responses = [
+        (
+            SimpleNamespace(
+                is_error=True,
+                result="session unavailable",
+                errors=[],
+                terminal_reason="error",
+                stop_reason=None,
+                subtype="error",
+                structured_output=None,
+            ),
+            None,
+        ),
+        (
+            SimpleNamespace(
+                is_error=False,
+                result=None,
+                errors=[],
+                terminal_reason=None,
+                stop_reason=None,
+                subtype="success",
+                structured_output={
+                    "exit_code": 0,
+                    "log_path": "artifacts/repair-smoke.log",
+                    "description": "passed",
+                },
+            ),
+            "new-session",
+        ),
+    ]
+
+    def fake_options(*args: object, **kwargs: object) -> dict:
+        return {}
+
+    async def fake_invoke(*, options: object, **kwargs: object) -> tuple[object, str | None]:
+        observed_resumes.append(getattr(options, "resume", None))
+        return responses.pop(0)
+
+    monkeypatch.setattr(runner, "_base_options", fake_options)
+    monkeypatch.setattr(runner, "_invoke_agent", fake_invoke)
+    artifact, session_id = asyncio.run(
+        pipeline._run_structured_stage(
+            tmp_path,
+            stage="repair",
+            prompt="repair",
+            schema=SmokeTestResult,
+            tools=[],
+            assigned_gpu="0",
+            model="test",
+            max_turns=1,
+            max_budget_usd=1,
+            validator=lambda output: None,
+            initial_session_id="expired-session",
+        )
+    )
+    assert artifact.exit_code == 0
+    assert session_id == "new-session"
+    assert observed_resumes == ["expired-session", None]
+
+
+def test_execution_loop_repairs_failure_then_succeeds_and_archives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exit_code, repairs, executions, final = _exercise_execution_loop(
+        tmp_path,
+        monkeypatch,
+        [_result("failed", "first failure"), _result("succeeded")],
+    )
+    assert (exit_code, repairs, executions, final.status) == (0, 1, 2, "succeeded")
+    archived = tmp_path / "loop-run" / "artifacts" / "execution-attempts" / "attempt-1"
+    assert (archived / "execution_result.json").is_file()
+    assert (archived / "executor.log").is_file()
+    assert (archived / "full-run" / "metrics.json").is_file()
+
+
+def test_execution_loop_stops_after_two_repairs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exit_code, repairs, executions, final = _exercise_execution_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            _result("failed", "failure one"),
+            _result("failed", "failure two"),
+            _result("failed", "failure three"),
+        ],
+    )
+    assert (exit_code, repairs, executions, final.status) == (1, 2, 3, "failed")
+
+
+@pytest.mark.parametrize("status", ["timed_out", "blocked"])
+def test_execution_loop_does_not_repair_timeout_or_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    exit_code, repairs, executions, final = _exercise_execution_loop(
+        tmp_path, monkeypatch, [_result(status, status)]
+    )
+    assert (exit_code, repairs, executions, final.status) == (1, 0, 1, status)
+
+
+def test_execution_loop_stops_on_repeated_failure_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failure = _result("failed", "same failure")
+    exit_code, repairs, executions, final = _exercise_execution_loop(
+        tmp_path, monkeypatch, [failure, failure]
+    )
+    assert (exit_code, repairs, executions, final.status) == (1, 1, 2, "failed")
+
+
+def test_execution_loop_stops_when_repair_validation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exit_code, repairs, executions, final = _exercise_execution_loop(
+        tmp_path,
+        monkeypatch,
+        [_result("failed", "repairable")],
+        repair_error=StageValidationError("execution repair was a no-op"),
+    )
+    assert (exit_code, repairs, executions, final.status) == (1, 1, 1, "failed")
+
+
+def test_execution_repair_rejects_changed_scientific_value(tmp_path: Path) -> None:
+    _paper(tmp_path)
+    _repository(tmp_path)
+    target = _target(tmp_path)
+    audit = _audit(tmp_path, target)
+    _write_json(tmp_path / "configuration_audit.json", audit.model_dump(mode="json"))
+    changed_file = tmp_path / "workspace" / "launch.sh"
+    changed_file.write_text("repaired\n", encoding="utf-8")
+    smoke_log = tmp_path / "artifacts" / "execution-repairs" / "repair-1" / "smoke.log"
+    smoke_log.parent.mkdir(parents=True)
+    smoke_log.write_text("passed\n", encoding="utf-8")
+    patch_path = tmp_path / "execution_repairs" / "repair-1.patch"
+    patch_path.parent.mkdir()
+    patch_path.write_text("", encoding="utf-8")
+
+    environment = EnvironmentManifest(
+        status="ready",
+        image_tag="demo:test",
+        dockerfile="workspace/Dockerfile",
+        dockerfile_sha256="0" * 64,
+        build_log_path="artifacts/build.log",
+        build_succeeded=True,
+    )
+    previous = ExecutionManifest(
+        schema_version=1,
+        status="ready",
+        selected_experiment=target.selected_experiment,
+        image_tag="demo:test",
+        launch_script="workspace/launch.sh",
+        launch_script_sha256=sha256_file(changed_file),
+        host_repository="workspace/repo",
+        container_repository="/run/workspace/repo",
+        timeout_seconds=60,
+        expected_outputs=["artifacts/full-run/metrics.json"],
+        smoke_test={
+            "exit_code": 0,
+            "log_path": "artifacts/execution-repairs/repair-1/smoke.log",
+            "description": "passed",
+        },
+        repository_commit=audit.repository_commit,
+        scientific_configuration=_resolved_inputs(),
+        metric_name=target.metric_name,
+        paper_target_value=target.metric_value,
+    )
+    changed = previous.model_copy(deep=True)
+    changed.scientific_configuration[0].value = "DifferentSet"
+    fingerprint = "1" * 64
+    output = ExecutionRepairOutput.model_validate(
+        {
+            "repair": {
+                "attempt": 1,
+                "diagnosis": "launch failed",
+                "failure_fingerprint": fingerprint,
+                "changes": [
+                    {
+                        "path": "workspace/launch.sh",
+                        "kind": "launch_script",
+                        "summary": "repaired launch",
+                        "sha256": sha256_file(changed_file),
+                    }
+                ],
+                "repository_patch": {
+                    "base_commit": audit.repository_commit,
+                    "diff_path": "execution_repairs/repair-1.patch",
+                    "diff_sha256": sha256_file(patch_path),
+                    "changed_files": [],
+                },
+                "smoke_test": changed.smoke_test.model_dump(mode="json"),
+            },
+            "environment": environment.model_dump(mode="json"),
+            "manifest": changed.model_dump(mode="json"),
+        }
+    )
+
+    with pytest.raises(StageValidationError, match="scientific configuration values"):
+        validate_execution_repair(
+            tmp_path,
+            target,
+            audit,
+            previous,
+            output,
+            attempt=1,
+            failure_fingerprint=fingerprint,
+            target_sha256=sha256_file(tmp_path / "target.json"),
+            audit_sha256=sha256_file(tmp_path / "configuration_audit.json"),
+        )
+
+
 def test_final_report_cannot_substitute_achieved_value(tmp_path: Path) -> None:
     _paper(tmp_path)
     target = _target(tmp_path)
+    audit = _audit(tmp_path, target)
+    environment = EnvironmentManifest(status="blocked", blocked_reason="test fixture")
+    manifest = ExecutionManifest(
+        status="blocked",
+        selected_experiment=target.selected_experiment,
+        blocked_reason="test fixture",
+    )
     result = ExecutionResult(
         status="succeeded",
         command=["python", "run.py"],
@@ -540,19 +960,98 @@ def test_final_report_cannot_substitute_achieved_value(tmp_path: Path) -> None:
         achieved_metric="0.91",
         metric_source="full-run/metrics.json",
     )
-    report = FinalReport(
-        selected_experiment=target.selected_experiment,
-        execution_status="succeeded",
-        metric_name=target.metric_name,
-        paper_target_value=target.metric_value,
-        achieved_value="0.99",
-        comparable=True,
-        match=True,
-        comparison_explanation="Incorrect substituted value.",
-    )
+    report = _final_report(target, result, achieved_value="0.99")
 
     with pytest.raises(
         StageValidationError,
         match="achieved value differs from deterministic extraction",
     ):
-        validate_final_report(target, result, report)
+        validate_final_report(
+            tmp_path,
+            target,
+            audit,
+            environment,
+            manifest,
+            result,
+            report,
+        )
+
+
+def test_final_report_must_cover_every_paper_missing_fallback(tmp_path: Path) -> None:
+    _paper(tmp_path)
+    target = _target(tmp_path)
+    audit = _audit(tmp_path, target)
+    audit.configuration.append(
+        ScientificConfigurationItem(
+            id="batch-size",
+            category="training",
+            name="batch size",
+            code_default="64",
+            code_evidence=_code_ref("def run"),
+            consumed_by=_code_ref("def run"),
+            chosen_value="64",
+            finding="paper_missing",
+            notes="paper does not specify the batch size",
+        )
+    )
+    environment = EnvironmentManifest(status="blocked", blocked_reason="test fixture")
+    manifest = ExecutionManifest(
+        status="blocked",
+        selected_experiment=target.selected_experiment,
+        blocked_reason="test fixture",
+    )
+    result = ExecutionResult(
+        status="succeeded",
+        command=["python", "run.py"],
+        exit_code=0,
+        timed_out=False,
+        duration_seconds=1,
+        log_path="logs/executor.log",
+        expected_outputs=["artifacts/full-run/metrics.json"],
+        missing_outputs=[],
+        achieved_metric="0.91",
+        metric_source="artifacts/full-run/metrics.json",
+    )
+    report = _final_report(target, result)
+
+    with pytest.raises(
+        StageValidationError,
+        match="omitted paper-missing assumptions: batch-size",
+    ):
+        validate_final_report(
+            tmp_path,
+            target,
+            audit,
+            environment,
+            manifest,
+            result,
+            report,
+        )
+
+    report = _final_report(
+        target,
+        result,
+        assumptions=[
+            {
+                "id": "A1",
+                "category": "config",
+                "setting": "batch size",
+                "value_used": "64",
+                "paper_status": "not_specified",
+                "source_type": "code_default",
+                "source_path": "run.py",
+                "audit_item_ids": ["batch-size"],
+                "rationale": "The official entrypoint consumes its default.",
+                "impact": "May affect optimization.",
+            }
+        ],
+    )
+    validate_final_report(
+        tmp_path,
+        target,
+        audit,
+        environment,
+        manifest,
+        result,
+        report,
+    )

@@ -445,6 +445,82 @@ class PreparationStageOutput(BaseModel):
     manifest: ExecutionManifest
 
 
+RepairChangeKind = Literal[
+    "environment",
+    "dependency",
+    "launch_script",
+    "generated_config",
+    "source_patch",
+    "metric_extractor",
+    "other",
+]
+
+
+class RepairChange(BaseModel):
+    """One file-level change made to repair a failed execution."""
+
+    path: str
+    kind: RepairChangeKind
+    summary: str = Field(..., min_length=1)
+    sha256: str | None = None
+
+    @model_validator(mode="after")
+    def validate_change(self) -> RepairChange:
+        self.path = _relative_path(self.path, "repair change path")
+        if self.sha256 is not None and not _SHA256.fullmatch(self.sha256):
+            raise ValueError("repair change sha256 must be a lowercase SHA-256 digest")
+        return self
+
+
+class RepositoryPatchEvidence(BaseModel):
+    """Complete repository diff against the pinned base commit after a repair."""
+
+    base_commit: str
+    diff_path: str
+    diff_sha256: str
+    changed_files: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_patch(self) -> RepositoryPatchEvidence:
+        if not self.base_commit.strip():
+            raise ValueError("repository patch base_commit cannot be empty")
+        self.diff_path = _relative_path(self.diff_path, "repository diff path")
+        if not _SHA256.fullmatch(self.diff_sha256):
+            raise ValueError("repository diff_sha256 must be a lowercase SHA-256 digest")
+        self.changed_files = [
+            _relative_path(path, "repository changed file") for path in self.changed_files
+        ]
+        return self
+
+
+class ExecutionRepairRecord(BaseModel):
+    """Auditable diagnosis and evidence for one execution repair."""
+
+    schema_version: Literal[1] = 1
+    attempt: int = Field(..., ge=1, le=2)
+    diagnosis: str = Field(..., min_length=1)
+    failure_fingerprint: str
+    changes: list[RepairChange] = Field(..., min_length=1)
+    repository_patch: RepositoryPatchEvidence
+    smoke_test: SmokeTestResult
+
+    @model_validator(mode="after")
+    def validate_record(self) -> ExecutionRepairRecord:
+        if not _SHA256.fullmatch(self.failure_fingerprint):
+            raise ValueError("failure_fingerprint must be a lowercase SHA-256 digest")
+        if self.smoke_test.exit_code != 0:
+            raise ValueError("execution repair requires a successful smoke test")
+        return self
+
+
+class ExecutionRepairOutput(BaseModel):
+    """Structured output from repairing one failed deterministic execution."""
+
+    repair: ExecutionRepairRecord
+    environment: EnvironmentManifest
+    manifest: ExecutionManifest
+
+
 class ExecutionResult(BaseModel):
     """Durable result emitted by the Python executor."""
 
@@ -464,28 +540,144 @@ class ExecutionResult(BaseModel):
     metric_extraction_error: str | None = None
 
 
+class ReportResultLocation(BaseModel):
+    """Paper location of the selected result, with optional structured coordinates."""
+
+    description: str
+    table_or_figure: str | None = None
+    row: str | None = None
+    column: str | None = None
+    cell: str | None = None
+
+
+class BaselineComparison(BaseModel):
+    """Applicable paper baseline used in the reproduction verdict."""
+
+    applicable: bool
+    method: str | None = None
+    value: str | None = None
+    metric_direction: Literal[
+        "higher_is_better",
+        "lower_is_better",
+        "not_applicable",
+        "unknown",
+    ]
+    paper_evidence: PaperEvidence | None = None
+    applicability_explanation: str
+
+    @model_validator(mode="after")
+    def validate_baseline(self) -> BaselineComparison:
+        if self.applicable:
+            missing = [
+                name
+                for name, value in {
+                    "method": self.method,
+                    "value": self.value,
+                    "paper_evidence": self.paper_evidence,
+                }.items()
+                if value is None or value == ""
+            ]
+            if missing:
+                raise ValueError(
+                    "applicable baseline is missing: " + ", ".join(missing)
+                )
+            if self.metric_direction not in {"higher_is_better", "lower_is_better"}:
+                raise ValueError(
+                    "applicable baseline requires a known higher/lower metric direction"
+                )
+        return self
+
+
+ReportVerdict = Literal["match", "miss", "run_incomplete", "needs_review"]
+
+
+class MetricComparison(BaseModel):
+    """LLM-authored interpretation of the frozen paper and reproduced values."""
+
+    comparable: bool
+    calculation: str
+    relative_error_percent: float | None = Field(default=None, ge=0)
+    baseline_advantage_preserved: bool | None = None
+    verdict: ReportVerdict
+    explanation: str
+
+    @model_validator(mode="after")
+    def validate_verdict(self) -> MetricComparison:
+        if self.verdict in {"match", "miss"} and not self.comparable:
+            raise ValueError("match/miss verdict requires comparable values")
+        return self
+
+
+AssumptionCategory = Literal["config", "environment", "evaluation"]
+AssumptionSource = Literal[
+    "code_default",
+    "experiment_config",
+    "readme",
+    "environment",
+    "agent_inference",
+    "other",
+]
+
+
+class AssumptionRecord(BaseModel):
+    """One explicit fallback or interpretation used by the reproduction."""
+
+    id: str = Field(..., min_length=1)
+    category: AssumptionCategory
+    setting: str = Field(..., min_length=1)
+    value_used: str | None = None
+    paper_status: Literal["not_specified", "ambiguous", "not_applicable"]
+    source_type: AssumptionSource
+    source_path: str | None = None
+    source_locator: str | None = None
+    audit_item_ids: list[str] = Field(default_factory=list)
+    rationale: str = Field(..., min_length=1)
+    impact: str = Field(..., min_length=1)
+
+
+class ReportArtifactReferences(BaseModel):
+    """Run-root-relative paths to authoritative reproduction evidence."""
+
+    configuration_used: str = "execution_manifest.json"
+    configuration_audit: str = "configuration_audit.json"
+    environment_manifest: str = "environment_manifest.json"
+    dockerfile: str | None = None
+    build_log: str | None = None
+    launch_script: str | None = None
+    launch_script_sha256: str | None = None
+    execution_result: str = "execution_result.json"
+    metric_artifact: str | None = None
+    executor_log: str = "logs/executor.log"
+    assumptions: str = "assumptions.json"
+
+
 class FinalReport(BaseModel):
     """Evidence-only final conclusion produced from frozen artifacts."""
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     selected_experiment: str
+    result_location: ReportResultLocation
     execution_status: Literal["succeeded", "failed", "timed_out", "blocked"]
     metric_name: str
     paper_target_value: str
     achieved_value: str | None = None
-    comparable: bool
-    match: bool | None = None
-    comparison_explanation: str
-    assumptions: list[str] = Field(default_factory=list)
+    baseline: BaselineComparison
+    comparison: MetricComparison
+    artifacts: ReportArtifactReferences = Field(default_factory=ReportArtifactReferences)
+    assumptions: list[AssumptionRecord] = Field(default_factory=list)
+    deviations: list[str] = Field(default_factory=list)
     gaps: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_conclusion(self) -> FinalReport:
-        if not self.comparable and self.match is not None:
-            raise ValueError("an incomparable result cannot have a match verdict")
-        if self.execution_status != "succeeded":
-            if self.comparable:
-                raise ValueError("an unsuccessful execution cannot be declared comparable")
-            if self.match is not None:
-                raise ValueError("an unsuccessful execution cannot have a match verdict")
+        if self.execution_status != "succeeded" and self.comparison.verdict in {
+            "match",
+            "miss",
+        }:
+            raise ValueError("an unsuccessful execution cannot have a match/miss verdict")
+        if self.execution_status != "succeeded" and self.comparison.comparable:
+            raise ValueError("an unsuccessful execution cannot be declared comparable")
+        ids = [item.id for item in self.assumptions]
+        if len(ids) != len(set(ids)):
+            raise ValueError("assumption ids must be unique")
         return self

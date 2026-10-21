@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
+import shutil
+import subprocess
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +26,7 @@ from .schemas import (
     ConfigurationAudit,
     EnvironmentManifest,
     ExecutionManifest,
+    ExecutionRepairOutput,
     ExecutionResult,
     PreparationStageOutput,
     TargetContract,
@@ -31,6 +35,7 @@ from .validators import (
     StageValidationError,
     sha256_file,
     validate_audit,
+    validate_execution_repair,
     validate_preparation,
     validate_target,
 )
@@ -108,17 +113,20 @@ async def _run_structured_stage(
     max_budget_usd: float,
     validator: Callable[[ModelT], None],
     normalizer: Callable[[Any], Any] | None = None,
+    initial_session_id: str | None = None,
 ) -> tuple[ModelT, str]:
     """Invoke one constrained Claude stage and allow one evidence-based correction."""
 
     from .runner import _base_options, _invoke_agent
 
     log_path = run_dir / "logs" / "agent_messages.jsonl"
-    session_id: str | None = None
+    session_id = initial_session_id
+    resume_fallback_available = initial_session_id is not None
     correction: str | None = None
     last_error: Exception | None = None
 
-    for attempt in range(1, 3):
+    maximum_attempts = 4 if initial_session_id else 2
+    for attempt in range(1, maximum_attempts + 1):
         _update_stage(
             run_dir,
             stage,
@@ -151,12 +159,15 @@ async def _run_structured_stage(
             stage=f"{stage}-{attempt}",
         )
         session_id = observed_session or session_id
+        invocation_failed = False
         if result.is_error:
             detail = result.result or ", ".join(result.errors or []) or "unknown SDK error"
             terminal_reason = result.terminal_reason or result.stop_reason or "unknown"
             last_error = RuntimeError(f"{stage} failed ({terminal_reason}): {detail}")
+            invocation_failed = True
         elif result.subtype != "success" or result.structured_output is None:
             last_error = RuntimeError(f"{stage} ended without structured output")
+            invocation_failed = True
         else:
             try:
                 raw_output = result.structured_output
@@ -174,6 +185,13 @@ async def _run_structured_stage(
             except (ValidationError, StageValidationError, ValueError, RuntimeError) as exc:
                 last_error = exc
 
+        if resume_fallback_available and invocation_failed:
+            # Saved Claude sessions can expire. Retry the same evidence-complete prompt
+            # statelessly, then retain the ordinary correction attempt if validation fails.
+            session_id = None
+            resume_fallback_available = False
+            correction = None
+            continue
         if not session_id:
             break
         correction = (
@@ -636,6 +654,374 @@ async def prepare_environment(
     return output.environment, output.manifest
 
 
+def _failure_fingerprint(run_dir: Path, result: ExecutionResult) -> str:
+    """Return a stable fingerprint for one deterministic execution failure."""
+
+    log_path = Path(result.log_path)
+    if not log_path.is_absolute():
+        log_path = run_dir / log_path
+    log_sha256 = sha256_file(log_path) if log_path.is_file() else None
+    payload = {
+        "status": result.status,
+        "exit_code": result.exit_code,
+        "timed_out": result.timed_out,
+        "error": result.error,
+        "missing_outputs": sorted(result.missing_outputs),
+        "metric_extraction_error": result.metric_extraction_error,
+        "log_sha256": log_sha256,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _workspace_hashes(run_dir: Path) -> dict[str, str]:
+    """Hash mutable, reasonably sized workspace files for no-op detection."""
+
+    hashes: dict[str, str] = {}
+    workspace = run_dir / "workspace"
+    if not workspace.is_dir():
+        return hashes
+    for path in workspace.rglob("*"):
+        if not path.is_file() or path.is_symlink() or ".git" in path.relative_to(workspace).parts:
+            continue
+        # Source, dependency, launch, and generated config files are expected to be small.
+        # Avoid hashing downloaded model/data payloads merely to detect a repair no-op.
+        if path.stat().st_size > 16 * 1024 * 1024:
+            continue
+        relative = path.relative_to(run_dir).as_posix()
+        hashes[relative] = sha256_file(path)
+    return hashes
+
+
+def _git_output(repository: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown git error"
+        raise StageValidationError(f"cannot capture repository repair evidence: {detail}")
+    return completed.stdout
+
+
+def _capture_repository_patch(
+    run_dir: Path,
+    audit: ConfigurationAudit,
+    attempt: int,
+) -> tuple[str, str, list[str]]:
+    """Persist the complete tracked and untracked repository diff."""
+
+    repository = run_dir / "workspace" / audit.repository_path
+    head = _git_output(repository, "rev-parse", "HEAD").strip()
+    if head != audit.repository_commit:
+        raise StageValidationError("repair changed the checked-out repository base commit")
+
+    status = _git_output(repository, "status", "--porcelain=v1", "--untracked-files=all")
+    changed_files: list[str] = []
+    untracked: list[str] = []
+    for line in status.splitlines():
+        if len(line) < 4:
+            continue
+        value = line[3:]
+        if " -> " in value:
+            value = value.split(" -> ", 1)[1]
+        changed_files.append(value)
+        if line.startswith("?? "):
+            untracked.append(value)
+
+    tracked_patch = _git_output(repository, "diff", "--binary", audit.repository_commit, "--", ".")
+    patch_parts = [tracked_patch]
+    for relative in untracked:
+        candidate = repository / relative
+        if not candidate.is_file():
+            continue
+        completed = subprocess.run(
+            ["git", "diff", "--no-index", "--binary", "--", "/dev/null", relative],
+            cwd=repository,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode not in {0, 1}:
+            detail = completed.stderr.strip() or "unknown git diff error"
+            raise StageValidationError(f"cannot capture untracked repository file: {detail}")
+        patch_parts.append(completed.stdout)
+
+    relative_path = f"execution_repairs/repair-{attempt}.patch"
+    patch_path = run_dir / relative_path
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    patch_path.write_text("".join(patch_parts), encoding="utf-8")
+    return relative_path, sha256_file(patch_path), sorted(set(changed_files))
+
+
+def _archive_execution_attempt(
+    run_dir: Path,
+    result: ExecutionResult,
+    manifest: ExecutionManifest,
+    attempt: int,
+) -> Path:
+    """Archive failed evidence and remove outputs that could create stale success."""
+
+    destination = run_dir / "artifacts" / "execution-attempts" / f"attempt-{attempt}"
+    destination.mkdir(parents=True, exist_ok=True)
+    result_path = run_dir / "execution_result.json"
+    if result_path.is_file():
+        shutil.copy2(result_path, destination / "execution_result.json")
+    log_path = Path(result.log_path)
+    if not log_path.is_absolute():
+        log_path = run_dir / log_path
+    if log_path.is_file():
+        shutil.copy2(log_path, destination / "executor.log")
+
+    full_run = run_dir / "artifacts" / "full-run"
+    if full_run.exists():
+        shutil.move(str(full_run), str(destination / "full-run"))
+    for relative in manifest.expected_outputs:
+        output = run_dir / relative
+        if not output.exists():
+            continue
+        archived = destination / "expected-outputs" / Path(relative).relative_to("artifacts")
+        archived.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(output), str(archived))
+    return destination
+
+
+def _repair_state(
+    environment: EnvironmentManifest,
+    manifest: ExecutionManifest,
+    workspace_hashes: dict[str, str],
+    repository_diff_sha256: str,
+) -> str:
+    """Hash only mutable delivery/environment state, never smoke-test evidence."""
+
+    payload = {
+        "environment": {
+            "image_tag": environment.image_tag,
+            "dockerfile": environment.dockerfile,
+            "dockerfile_sha256": environment.dockerfile_sha256,
+            "build_log_path": environment.build_log_path,
+            "build_succeeded": environment.build_succeeded,
+        },
+        "manifest": {
+            "image_tag": manifest.image_tag,
+            "launch_script": manifest.launch_script,
+            "launch_script_sha256": manifest.launch_script_sha256,
+            "host_repository": manifest.host_repository,
+            "container_repository": manifest.container_repository,
+            "timeout_seconds": manifest.timeout_seconds,
+            "expected_outputs": manifest.expected_outputs,
+            "metric_artifact": manifest.metric_artifact,
+            "metric_extractor": (
+                manifest.metric_extractor.model_dump(mode="json")
+                if manifest.metric_extractor
+                else None
+            ),
+            "scientific_configuration": [
+                item.model_dump(mode="json") for item in manifest.scientific_configuration
+            ],
+        },
+        "workspace_hashes": workspace_hashes,
+        "repository_diff_sha256": repository_diff_sha256,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+async def repair_execution(
+    run_dir: Path,
+    *,
+    target: TargetContract,
+    audit: ConfigurationAudit,
+    environment: EnvironmentManifest,
+    manifest: ExecutionManifest,
+    failed_result: ExecutionResult,
+    attempt: int,
+    max_repairs: int,
+    failure_fingerprint: str,
+    assigned_gpu: str,
+    model: str,
+    max_turns: int,
+    max_budget_usd: float,
+) -> tuple[EnvironmentManifest, ExecutionManifest, str]:
+    """Ask the preparation agent for one bounded repair and validate it."""
+
+    from .runner import _atomic_json, _render_prompt
+
+    target_sha256 = sha256_file(run_dir / "target.json")
+    audit_sha256 = sha256_file(run_dir / "configuration_audit.json")
+    target_bytes = (run_dir / "target.json").read_bytes()
+    audit_bytes = (run_dir / "configuration_audit.json").read_bytes()
+    before_workspace = _workspace_hashes(run_dir)
+    before_patch_path, before_patch_sha, _ = _capture_repository_patch(run_dir, audit, 0)
+    (run_dir / before_patch_path).unlink()
+    before_state = _repair_state(environment, manifest, before_workspace, before_patch_sha)
+    metadata = _read_json(run_dir / "metadata.json")
+    preparation_session = (
+        metadata.get("stages", {}).get("environment_preparation", {}).get("session_id")
+    )
+    prompt = _render_prompt(
+        "repair_execution.md",
+        {
+            "REPAIR_ATTEMPT": str(attempt),
+            "MAX_REPAIRS": str(max_repairs),
+            "TARGET_PATH": str(run_dir / "target.json"),
+            "AUDIT_PATH": str(run_dir / "configuration_audit.json"),
+            "ENVIRONMENT_PATH": str(run_dir / "environment_manifest.json"),
+            "MANIFEST_PATH": str(run_dir / "execution_manifest.json"),
+            "RESULT_PATH": str(run_dir / "execution_result.json"),
+            "LOG_PATH": failed_result.log_path,
+            "REPOSITORY": str(run_dir / "workspace" / audit.repository_path),
+            "REPOSITORY_COMMIT": audit.repository_commit,
+            "REPAIRS_PATH": str(run_dir / "execution_repairs"),
+        },
+    )
+    prompt_path = run_dir / "prompts" / f"execution_repair-{attempt}.md"
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_path.write_text(prompt, encoding="utf-8")
+
+    def _normalize(raw_output: Any) -> Any:
+        output = _normalize_preparation_output(
+            raw_output,
+            run_dir=run_dir,
+            target=target,
+            audit=audit,
+        )
+        if not isinstance(output, dict):
+            return output
+        repair = output.get("repair")
+        environment_data = output.get("environment")
+        manifest_data = output.get("manifest")
+        if not all(isinstance(value, dict) for value in (repair, environment_data, manifest_data)):
+            return output
+
+        repair["attempt"] = attempt
+        repair["failure_fingerprint"] = failure_fingerprint
+        after_workspace = _workspace_hashes(run_dir)
+        actual_changes = {
+            path for path, digest in after_workspace.items() if before_workspace.get(path) != digest
+        }
+        actual_changes.update(set(before_workspace) - set(after_workspace))
+        reported = {
+            change.get("path"): change
+            for change in repair.get("changes", [])
+            if isinstance(change, dict) and isinstance(change.get("path"), str)
+        }
+        changes: list[dict[str, Any]] = []
+        for path in sorted(actual_changes):
+            candidate = run_dir / path
+            if not candidate.is_file():
+                continue
+            item = reported.get(path, {})
+            changes.append(
+                {
+                    "path": path,
+                    "kind": item.get(
+                        "kind",
+                        "source_patch" if path.startswith("workspace/repo/") else "other",
+                    ),
+                    "summary": item.get("summary") or "File changed during execution repair.",
+                    "sha256": sha256_file(candidate),
+                }
+            )
+        repair["changes"] = changes
+
+        dockerfile = environment_data.get("dockerfile")
+        if isinstance(dockerfile, str) and (run_dir / dockerfile).is_file():
+            environment_data["dockerfile_sha256"] = sha256_file(run_dir / dockerfile)
+        launch_script = manifest_data.get("launch_script")
+        if isinstance(launch_script, str) and (run_dir / launch_script).is_file():
+            manifest_data["launch_script_sha256"] = sha256_file(run_dir / launch_script)
+
+        patch_path, patch_sha, changed_files = _capture_repository_patch(run_dir, audit, attempt)
+        repair["repository_patch"] = {
+            "base_commit": audit.repository_commit,
+            "diff_path": patch_path,
+            "diff_sha256": patch_sha,
+            "changed_files": changed_files,
+        }
+        # Match the exact bytes written by runner._atomic_json.
+        environment_bytes = json.dumps(environment_data, indent=2).encode("utf-8")
+        manifest_data["environment_sha256"] = hashlib.sha256(environment_bytes).hexdigest()
+        return output
+
+    def _validate(output: ExecutionRepairOutput) -> None:
+        validate_execution_repair(
+            run_dir,
+            target,
+            audit,
+            manifest,
+            output,
+            attempt=attempt,
+            failure_fingerprint=failure_fingerprint,
+            target_sha256=target_sha256,
+            audit_sha256=audit_sha256,
+        )
+        after_workspace = _workspace_hashes(run_dir)
+        after_state = _repair_state(
+            output.environment,
+            output.manifest,
+            after_workspace,
+            output.repair.repository_patch.diff_sha256,
+        )
+        if after_state == before_state:
+            raise StageValidationError("execution repair was a no-op")
+
+        environment_path = run_dir / "environment_manifest.json"
+        manifest_path = run_dir / "execution_manifest.json"
+        previous_environment = environment_path.read_bytes()
+        previous_manifest = manifest_path.read_bytes()
+        try:
+            _atomic_json(environment_path, output.environment.model_dump(mode="json"))
+            output.manifest.environment_sha256 = sha256_file(environment_path)
+            _atomic_json(manifest_path, output.manifest.model_dump(mode="json"))
+            validate_preparation(
+                run_dir,
+                target,
+                audit,
+                output.environment,
+                output.manifest,
+            )
+            validate_manifest_files(run_dir, output.manifest)
+        except Exception:
+            environment_path.write_bytes(previous_environment)
+            manifest_path.write_bytes(previous_manifest)
+            raise
+
+    try:
+        output, session_id = await _run_structured_stage(
+            run_dir,
+            stage=f"execution_repair_{attempt}",
+            prompt=prompt,
+            schema=ExecutionRepairOutput,
+            tools=PREPARATION_TOOLS,
+            assigned_gpu=assigned_gpu,
+            model=model,
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            validator=_validate,
+            normalizer=_normalize,
+            initial_session_id=preparation_session,
+        )
+    except Exception:
+        (run_dir / "target.json").write_bytes(target_bytes)
+        (run_dir / "configuration_audit.json").write_bytes(audit_bytes)
+        raise
+    repair_path = run_dir / "execution_repairs" / f"repair-{attempt}.json"
+    _atomic_json(repair_path, output.repair.model_dump(mode="json"))
+    _update_stage(
+        run_dir,
+        f"execution_repair_{attempt}",
+        "succeeded",
+        session_id=session_id,
+    )
+    return output.environment, output.manifest, session_id
+
+
 def _blocked(run_dir: Path, stage: str, reason: str) -> int:
     from .runner import _update_metadata
 
@@ -752,19 +1138,89 @@ async def run_staged_pipeline(run_dir: Path, args: Any, *, recovering: bool = Fa
             executed_now = True
             if recovering and result_path.exists():
                 _preserve_previous_result(run_dir)
-            _update_stage(run_dir, "execution", "running", increment_attempt=True)
-            execution_result = await asyncio.to_thread(
-                execute_manifest,
-                run_dir,
-                manifest,
-                assigned_gpu=assigned_gpu,
+            max_repairs = int(getattr(args, "max_execution_repairs", 2))
+            previous_repairs = list((run_dir / "execution_repairs").glob("repair-*.json"))
+            repair_count = len(previous_repairs)
+            execution_attempt = int(
+                _read_json(run_dir / "metadata.json")
+                .get("stages", {})
+                .get("execution", {})
+                .get("attempts", 0)
             )
-            execution_result.manifest_sha256 = sha256_file(run_dir / "execution_manifest.json")
-            _atomic_json(
-                result_path,
-                execution_result.model_dump(mode="json"),
-            )
-            _update_stage(run_dir, "execution", "succeeded")
+            seen_failure_fingerprints: set[str] = set()
+            for repair_path in previous_repairs:
+                try:
+                    fingerprint = _read_json(repair_path).get("failure_fingerprint")
+                    if isinstance(fingerprint, str):
+                        seen_failure_fingerprints.add(fingerprint)
+                except (OSError, json.JSONDecodeError):
+                    continue
+            while True:
+                execution_attempt += 1
+                _update_stage(run_dir, "execution", "running", increment_attempt=True)
+                execution_result = await asyncio.to_thread(
+                    execute_manifest,
+                    run_dir,
+                    manifest,
+                    assigned_gpu=assigned_gpu,
+                )
+                execution_result.manifest_sha256 = sha256_file(
+                    run_dir / "execution_manifest.json"
+                )
+                _atomic_json(
+                    result_path,
+                    execution_result.model_dump(mode="json"),
+                )
+                _update_stage(
+                    run_dir,
+                    "execution",
+                    execution_result.status,
+                    error=execution_result.error,
+                )
+
+                if execution_result.status != "failed" or repair_count >= max_repairs:
+                    break
+                fingerprint = _failure_fingerprint(run_dir, execution_result)
+                if fingerprint in seen_failure_fingerprints:
+                    _update_stage(
+                        run_dir,
+                        "execution",
+                        "failed",
+                        error="repeated execution failure fingerprint; repair loop stopped",
+                    )
+                    break
+                seen_failure_fingerprints.add(fingerprint)
+                _archive_execution_attempt(
+                    run_dir,
+                    execution_result,
+                    manifest,
+                    execution_attempt,
+                )
+                repair_count += 1
+                try:
+                    environment, manifest, _ = await repair_execution(
+                        run_dir,
+                        target=target,
+                        audit=audit,
+                        environment=environment,
+                        manifest=manifest,
+                        failed_result=execution_result,
+                        attempt=repair_count,
+                        max_repairs=max_repairs,
+                        failure_fingerprint=fingerprint,
+                        assigned_gpu=assigned_gpu,
+                        model=model,
+                        max_turns=args.max_turns,
+                        max_budget_usd=args.max_budget_usd,
+                    )
+                except (RuntimeError, StageValidationError, ValidationError, ValueError) as exc:
+                    _update_stage(
+                        run_dir,
+                        f"execution_repair_{repair_count}",
+                        "failed",
+                        error=str(exc),
+                    )
+                    break
 
         report_path = run_dir / "final_report.md"
         if executed_now or not report_path.is_file():

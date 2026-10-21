@@ -15,11 +15,19 @@ from urllib.parse import urlparse
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, SystemMessage, query
 from dotenv import load_dotenv
+from pydantic import ValidationError
 
 from repo2reproduce.provider import ensure_runtime_path, provider_env
 
 from . import config
-from .schemas import ExecutionResult, FinalReport, TargetContract
+from .schemas import (
+    ConfigurationAudit,
+    EnvironmentManifest,
+    ExecutionManifest,
+    ExecutionResult,
+    FinalReport,
+    TargetContract,
+)
 from .validators import validate_final_report
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -217,6 +225,198 @@ def _base_options(
     }
 
 
+def _run_relative_path(run_dir: Path, value: str | None, fallback: str) -> str:
+    """Return a stable run-root-relative evidence path."""
+
+    if not value:
+        return fallback
+    path = Path(value)
+    if not path.is_absolute():
+        return path.as_posix()
+    try:
+        return path.resolve().relative_to(run_dir.resolve()).as_posix()
+    except ValueError:
+        return fallback
+
+
+def _render_final_report(report: FinalReport) -> str:
+    """Render the concise human-facing view of the structured final report."""
+
+    location = report.result_location
+    location_details = [
+        ("Table/Figure", location.table_or_figure),
+        ("Row", location.row),
+        ("Column", location.column),
+        ("Cell", location.cell),
+    ]
+    location_lines = [
+        f"- **{label}:** {value}" for label, value in location_details if value
+    ]
+
+    baseline = report.baseline
+    if baseline.applicable:
+        baseline_lines = [
+            f"- **Method:** {baseline.method}",
+            f"- **Value:** {baseline.value}",
+            f"- **Metric direction:** {baseline.metric_direction.replace('_', ' ')}",
+            f"- **Applicability:** {baseline.applicability_explanation}",
+        ]
+        if baseline.paper_evidence is not None:
+            baseline_lines.extend(
+                [
+                    f'- **Paper evidence:** "{baseline.paper_evidence.quote}"',
+                    f"- **Evidence location:** {baseline.paper_evidence.locator}",
+                ]
+            )
+    else:
+        baseline_lines = [
+            "- **Applicable baseline:** None",
+            f"- **Metric direction:** {baseline.metric_direction.replace('_', ' ')}",
+            f"- **Reason:** {baseline.applicability_explanation}",
+        ]
+
+    comparison = report.comparison
+    relative_error = (
+        "not applicable"
+        if comparison.relative_error_percent is None
+        else f"{comparison.relative_error_percent:.6g}%"
+    )
+    assumptions = [
+        (
+            f"- **[{item.category}] {item.id} — {item.setting}:** "
+            f"{item.value_used or 'interpretation only'}; "
+            f"paper {item.paper_status.replace('_', ' ')}; "
+            f"source {item.source_type.replace('_', ' ')}. {item.rationale}"
+        )
+        for item in report.assumptions
+    ]
+
+    artifacts = report.artifacts
+    artifact_items = [
+        ("Configuration used", artifacts.configuration_used),
+        ("Configuration audit", artifacts.configuration_audit),
+        ("Environment manifest", artifacts.environment_manifest),
+        ("Dockerfile", artifacts.dockerfile),
+        ("Environment build log", artifacts.build_log),
+        ("Scientific launch script", artifacts.launch_script),
+        ("Execution result", artifacts.execution_result),
+        ("Metric artifact", artifacts.metric_artifact),
+        ("Executor log", artifacts.executor_log),
+        ("Detailed assumptions", artifacts.assumptions),
+    ]
+    artifact_lines = [
+        f"- **{label}:** `{path}`" for label, path in artifact_items if path
+    ]
+    if artifacts.launch_script_sha256:
+        artifact_lines.append(
+            f"- **Launch script SHA-256:** `{artifacts.launch_script_sha256}`"
+        )
+
+    return "\n".join(
+        [
+            f"# Reproduction report: {report.selected_experiment}",
+            "",
+            "## Selected result",
+            f"- **Paper location:** {location.description}",
+            *location_lines,
+            f"- **Metric:** {report.metric_name}",
+            "",
+            "## Result",
+            f"- **Execution:** {report.execution_status}",
+            f"- **Paper target:** {report.paper_target_value}",
+            f"- **Reproduced value:** {report.achieved_value or 'not produced'}",
+            f"- **Relative error:** {relative_error}",
+            f"- **Verdict:** {comparison.verdict.replace('_', ' ')}",
+            f"- **Calculation:** {comparison.calculation}",
+            f"- **Explanation:** {comparison.explanation}",
+            "",
+            "## Paper baseline",
+            *baseline_lines,
+            "",
+            "## Assumptions and fallbacks",
+            *(assumptions or ["- None reported."]),
+            "",
+            "## Deviations",
+            *([f"- {item}" for item in report.deviations] or ["- None reported."]),
+            "",
+            "## Gaps",
+            *([f"- {item}" for item in report.gaps] or ["- None reported."]),
+            "",
+            "## Evidence files",
+            *artifact_lines,
+            "",
+        ]
+    )
+
+
+async def _request_final_report(
+    run_dir: Path,
+    *,
+    prompt: str,
+    assigned_gpu: str,
+    model: str,
+    max_turns: int,
+    max_budget_usd: float,
+) -> FinalReport:
+    """Request a structured report, allowing one schema-correction attempt."""
+
+    correction: str | None = None
+    session_id: str | None = None
+    last_error = "finalization returned no structured report"
+    for attempt in range(1, 3):
+        options_data = _base_options(
+            run_dir,
+            assigned_gpu=assigned_gpu,
+            model=model,
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+        )
+        options_data.update(
+            {
+                "allowed_tools": FINALIZATION_TOOLS,
+                "output_format": {
+                    "type": "json_schema",
+                    "schema": FinalReport.model_json_schema(),
+                },
+            }
+        )
+        if session_id:
+            options_data["resume"] = session_id
+        attempt_prompt = prompt
+        if correction:
+            attempt_prompt = correction if session_id else f"{prompt}\n\n{correction}"
+        result, observed_session = await _invoke_agent(
+            prompt=attempt_prompt,
+            options=ClaudeAgentOptions(**options_data),
+            log_path=run_dir / "logs" / "agent_messages.jsonl",
+            stage=f"finalize-{attempt}",
+        )
+        session_id = observed_session or session_id
+        if result.is_error:
+            last_error = (
+                result.result
+                or ", ".join(result.errors or [])
+                or "unknown SDK validation error"
+            )
+        elif result.subtype != "success" or result.structured_output is None:
+            last_error = "finalization returned no structured report"
+        else:
+            try:
+                return FinalReport.model_validate(result.structured_output)
+            except ValidationError as exc:
+                last_error = str(exc)
+
+        correction = (
+            "Your previous final report failed the required output schema. Correct only "
+            "the report structure or fields identified below. Re-read the persisted "
+            "evidence when needed; do not launch or repeat the experiment and do not "
+            "change any frozen scientific value. Return only the corrected FinalReport. "
+            f"Validation error: {last_error}"
+        )
+
+    raise RuntimeError(f"finalization failed after one correction retry: {last_error}")
+
+
 async def finalize_session(
     run_dir: Path,
     *,
@@ -242,73 +442,77 @@ async def finalize_session(
             "ENVIRONMENT_PATH": str(run_dir / "environment_manifest.json"),
             "MANIFEST_PATH": str(run_dir / "execution_manifest.json"),
             "RESULT_PATH": str(run_dir / "execution_result.json"),
+            "PAPER_MD": str(run_dir / "paper" / "paper.md"),
+            "PAPER_PARSE": str(run_dir / "paper" / "paper_parse.json"),
             "LOG_PATH": execution_result.log_path,
             "ARTIFACTS_PATH": str(run_dir / "artifacts"),
+            "REPAIRS_PATH": str(run_dir / "execution_repairs"),
         },
     )
     (run_dir / "finalize_prompt.txt").write_text(prompt, encoding="utf-8")
-    options_data = _base_options(
+    report = await _request_final_report(
         run_dir,
+        prompt=prompt,
         assigned_gpu=assigned_gpu,
         model=model,
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
     )
-    options_data.update(
-        {
-            "allowed_tools": FINALIZATION_TOOLS,
-            "output_format": {
-                "type": "json_schema",
-                "schema": FinalReport.model_json_schema(),
-            },
-        }
-    )
-    result, _ = await _invoke_agent(
-        prompt=prompt,
-        options=ClaudeAgentOptions(**options_data),
-        log_path=run_dir / "logs" / "agent_messages.jsonl",
-        stage="finalize",
-    )
-    if result.is_error:
-        detail = result.result or ", ".join(result.errors or []) or "unknown SDK error"
-        raise RuntimeError(f"finalization failed: {detail}")
-    if result.subtype != "success" or result.structured_output is None:
-        raise RuntimeError("finalization returned no structured report")
-    report = FinalReport.model_validate(result.structured_output)
     target = TargetContract.model_validate_json(
         (run_dir / "target.json").read_text(encoding="utf-8")
     )
+    audit = ConfigurationAudit.model_validate_json(
+        (run_dir / "configuration_audit.json").read_text(encoding="utf-8")
+    )
+    environment = EnvironmentManifest.model_validate_json(
+        (run_dir / "environment_manifest.json").read_text(encoding="utf-8")
+    )
+    manifest = ExecutionManifest.model_validate_json(
+        (run_dir / "execution_manifest.json").read_text(encoding="utf-8")
+    )
     report.selected_experiment = target.selected_experiment
+    report.result_location.description = target.result_location
     report.execution_status = execution_result.status
     report.metric_name = target.metric_name
     report.paper_target_value = target.metric_value
     report.achieved_value = execution_result.achieved_metric
-    validate_final_report(target, execution_result, report)
-    _atomic_json(run_dir / "final_report.json", report.model_dump(mode="json"))
-
-    match = "not determined" if report.match is None else ("yes" if report.match else "no")
-    markdown = "\n".join(
-        [
-            f"# Reproduction report: {report.selected_experiment}",
-            "",
-            f"- **Execution:** {report.execution_status}",
-            f"- **Metric:** {report.metric_name}",
-            f"- **Paper target:** {report.paper_target_value}",
-            f"- **Achieved:** {report.achieved_value or 'not produced'}",
-            f"- **Comparable:** {'yes' if report.comparable else 'no'}",
-            f"- **Match:** {match}",
-            "",
-            "## Comparison",
-            report.comparison_explanation,
-            "",
-            "## Assumptions",
-            *([f"- {item}" for item in report.assumptions] or ["- None reported."]),
-            "",
-            "## Gaps",
-            *([f"- {item}" for item in report.gaps] or ["- None reported."]),
-            "",
-        ]
+    report.artifacts.configuration_used = "execution_manifest.json"
+    report.artifacts.configuration_audit = "configuration_audit.json"
+    report.artifacts.environment_manifest = "environment_manifest.json"
+    report.artifacts.dockerfile = environment.dockerfile
+    report.artifacts.build_log = environment.build_log_path
+    report.artifacts.launch_script = manifest.launch_script
+    report.artifacts.launch_script_sha256 = manifest.launch_script_sha256
+    report.artifacts.execution_result = "execution_result.json"
+    report.artifacts.metric_artifact = (
+        execution_result.metric_source or manifest.metric_artifact
     )
+    report.artifacts.executor_log = _run_relative_path(
+        run_dir,
+        execution_result.log_path,
+        "logs/executor.log",
+    )
+    report.artifacts.assumptions = "assumptions.json"
+    validate_final_report(
+        run_dir,
+        target,
+        audit,
+        environment,
+        manifest,
+        execution_result,
+        report,
+    )
+    _atomic_json(run_dir / "final_report.json", report.model_dump(mode="json"))
+    _atomic_json(
+        run_dir / "assumptions.json",
+        {
+            "schema_version": 1,
+            "assumptions": [
+                item.model_dump(mode="json") for item in report.assumptions
+            ],
+        },
+    )
+    markdown = _render_final_report(report)
     (run_dir / "final_report.md").write_text(markdown, encoding="utf-8")
     return markdown
 
@@ -323,7 +527,13 @@ def _update_metadata(run_dir: Path, **updates: Any) -> None:
 def _preserve_previous_result(run_dir: Path) -> None:
     """Keep the prior blocked result/report before a recovery attempt overwrites them."""
 
-    for relative in ("execution_result.json", "final_report.md", "logs/executor.log"):
+    for relative in (
+        "execution_result.json",
+        "final_report.json",
+        "final_report.md",
+        "assumptions.json",
+        "logs/executor.log",
+    ):
         source = run_dir / relative
         if not source.exists():
             continue
@@ -399,6 +609,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model")
     parser.add_argument("--max-turns", type=int, default=config.max_turns())
     parser.add_argument("--max-budget-usd", type=float, default=config.max_budget_usd())
+    parser.add_argument(
+        "--max-execution-repairs",
+        type=int,
+        default=2,
+        help="Maximum LLM repairs after failed executions (0–2; default: 2)",
+    )
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument(
         "--skip-evidence-validation",
@@ -421,6 +637,8 @@ def main() -> None:
         raise SystemExit("--max-turns must be positive")
     if args.max_budget_usd <= 0:
         raise SystemExit("--max-budget-usd must be positive")
+    if not 0 <= args.max_execution_repairs <= 2:
+        raise SystemExit("--max-execution-repairs must be between 0 and 2")
     if args.recover_run:
         if args.paper_url or args.repo_url:
             parser.error("paper_url and repo_url cannot be used with --recover-run")
