@@ -1,5 +1,8 @@
 # Large run files
 runs/
+
+# Local r2r command reference; not part of the repository.
+HOWTOUSE.md
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

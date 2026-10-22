@@ -12,8 +12,8 @@ runs through a bash script in `scripts/`; the papers live in `dataset/papers.tsv
 | `scripts/summarize.sh` | Table of status, verdict, paper value, and reproduced value per run. |
 
 Every script prints its usage with `--help`. The [dataset README](dataset/README.md) lists
-the papers and the file format. [HOWTOUSE.md](HOWTOUSE.md) is the reference for the
-underlying `r2r` command.
+the papers, the file format, and worked examples of each script. `r2r --help` lists the
+underlying command.
 
 ## 1. Set up the environment
 
@@ -81,8 +81,8 @@ R2R_RUNS_ROOT=/data/<you>/r2r-runs
 ```
 
 With an Anthropic-compatible gateway, use `R2R_AUTH_MODE=custom_headers` with
-`R2R_BASE_URL`, `R2R_AUTH_HEADERS`, and `R2R_AUTH_KEY` instead; `.env.example` shows the
-format and [HOWTOUSE.md §3](HOWTOUSE.md#3-configure-the-provider) lists all settings.
+`R2R_BASE_URL`, `R2R_AUTH_HEADERS`, and `R2R_AUTH_KEY` instead. `.env.example` lists every
+setting.
 
 `R2R_RUNS_ROOT` is where run directories go. Put it **outside the checkout** on a large
 disk. When it is unset the scripts use `~/r2r-runs`. `.env` is git-ignored; never commit it.
@@ -223,9 +223,9 @@ Most useful files inside a run directory:
 | `artifacts/full-run/` | Raw outputs written by the experiment. |
 | `execution_repairs/` | Diagnosis and patch for each automatic repair, if any ran. |
 
-[HOWTOUSE.md §8](HOWTOUSE.md#8-run-artifacts) lists every file. Containers run as root, so
-files under `artifacts/` belong to root on the host; delete them through Docker as
-described there.
+Containers run as root, so files under `artifacts/` belong to root on the host. Remove them
+through Docker, for example
+`docker run --rm -v <run-dir>/artifacts:/a <image> rm -rf /a/full-run`.
 
 ## 4. Interpret the results
 

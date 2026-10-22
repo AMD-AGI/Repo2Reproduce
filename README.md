@@ -11,9 +11,10 @@ Repo2Reproduce is a Claude Code multistep agent that:
 
 The working agent is implemented entirely under `repo2reproduce/`.
 
-See [BENCHMARK.md](BENCHMARK.md) for the step-by-step setup and the bash scripts that run
-the 22-paper benchmark in [`dataset/`](dataset/README.md), and [HOWTOUSE.md](HOWTOUSE.md)
-for the `r2r` command reference: configuration, recovery, and generated artifacts.
+See [`dataset/`](dataset/README.md) for the 22 papers and how to run one paper, the full
+batch, a target, and a porting mode. [BENCHMARK.md](BENCHMARK.md) is the broader guide:
+host setup, where runs are written, and how to read a verdict. `r2r --help` lists the
+underlying command.
 
 Quick start:
 
