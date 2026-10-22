@@ -8,7 +8,47 @@ import pytest
 from repo2reproduce.porting import scanner
 from repo2reproduce.porting.scanner import scan_path, scan_source
 
-FIXTURES = Path(scanner.__file__).parent / "fixtures"
+SAMPLE_KERNELS = {
+    "reduction.cu": (
+        "__global__ void reduce(float* sdata, float mySum, unsigned int tid) {\n"
+        "    for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {\n"
+        "        if (tid < s) sdata[tid] = mySum = mySum + sdata[tid + s];\n"
+        "        __syncthreads();\n"
+        "    }\n"
+        "    if (tid < 32) {\n"
+        "        volatile float* vsmem = sdata;\n"
+        "        vsmem[tid] = mySum = mySum + vsmem[tid + 32];\n"
+        "    }\n"
+        "}\n"
+    ),
+    "attention.cu": (
+        "__global__ void softmax_max(float thread_max, float exp_sum) {\n"
+        "    for (int offset = 16; offset > 0; offset >>= 1)\n"
+        "        thread_max = fmaxf(thread_max, __shfl_down(thread_max, offset));\n"
+        "    float block_max = __shfl(thread_max, 0);\n"
+        "    for (int offset = 16; offset > 0; offset >>= 1)\n"
+        "        exp_sum += __shfl_down(exp_sum, offset);\n"
+        "}\n"
+    ),
+    "vector_add.cu": (
+        "__global__ void vectorAdd(const float* A, const float* B, float* C, int n) {\n"
+        "    int i = blockDim.x * blockIdx.x + threadIdx.x;\n"
+        "    if (i < n) {\n"
+        "        C[i] = A[i] + B[i];\n"
+        "        if (threadIdx.x % 32 == 0) {\n"
+        "            printf(\"warp %d\\n\", threadIdx.x / 32);\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    ),
+}
+
+
+def _sample_repository(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    for name, text in SAMPLE_KERNELS.items():
+        (root / name).write_text(text, encoding="utf-8")
+    return root
 
 
 def _hits(findings: list[scanner.Finding]) -> set[tuple[str, int]]:
@@ -19,23 +59,21 @@ def _severity(findings: list[scanner.Finding], rule: str) -> set[str]:
     return {finding.severity for finding in findings if finding.rule == rule}
 
 
-def test_rocmport_fixtures_only_need_review() -> None:
-    report = scan_path(FIXTURES)
+def test_warp32_sample_kernels_only_need_review(tmp_path: Path) -> None:
+    report = scan_path(_sample_repository(tmp_path / "repo"))
 
-    assert report.files_scanned == 5
-    assert report.counts() == {"blocker": 0, "high": 0, "review": 11, "info": 0}
+    assert report.files_scanned == 3
+    assert report.counts() == {"blocker": 0, "high": 0, "review": 7, "info": 0}
     by_file: dict[str, set[tuple[str, int]]] = {}
     for finding in report.findings:
         by_file.setdefault(finding.path, set()).add((finding.rule, finding.line))
-    assert by_file["reduction.cu"] == {("warp_sync_tail_32", 50), ("warp_sync_tail_32", 59)}
-    assert by_file["flash_attention_simplified.cu"] == {
-        ("shfl_offset_no_width", 49),
-        ("shfl_broadcast_no_width", 50),
-        ("shfl_offset_no_width", 59),
+    assert by_file["reduction.cu"] == {("warp_sync_tail_32", 2), ("warp_sync_tail_32", 6)}
+    assert by_file["attention.cu"] == {
+        ("shfl_offset_no_width", 3),
+        ("shfl_broadcast_no_width", 4),
+        ("shfl_offset_no_width", 6),
     }
-    assert ("lane_math_32", 13) in by_file["vector_add.cu"]
-    assert {rule for rule, _ in by_file["matrix_multiply.cu"]} == {"lane_math_32"}
-    assert ("lane_math_32", 56) not in by_file["matrix_multiply.cu"]
+    assert by_file["vector_add.cu"] == {("lane_math_32", 5), ("lane_math_32", 6)}
 
 
 def test_comments_and_plain_loops_are_ignored() -> None:
@@ -286,11 +324,14 @@ def test_generated_hip_translations_are_skipped(tmp_path: Path) -> None:
     assert report.findings == []
 
 
-def test_cli_prints_json_and_filters_by_severity(capsys: pytest.CaptureFixture[str]) -> None:
-    assert scanner.main([str(FIXTURES), "--json"]) == 0
+def test_cli_prints_json_and_filters_by_severity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository = _sample_repository(tmp_path / "repo")
+    assert scanner.main([str(repository), "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
-    assert data["counts"]["review"] == 11
+    assert data["counts"]["review"] == 7
     assert {"path", "line", "rule", "severity", "message", "hint"} <= set(data["findings"][0])
 
-    assert scanner.main([str(FIXTURES), "--min-severity", "high"]) == 0
+    assert scanner.main([str(repository), "--min-severity", "high"]) == 0
     assert "0 findings" in capsys.readouterr().out

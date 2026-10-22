@@ -9,8 +9,17 @@ from typing import Any
 import pytest
 
 from repo2reproduce.porting import official_hipify as hipify
+from tests.test_porting_scanner import SAMPLE_KERNELS
 
-FIXTURES = Path(hipify.__file__).parent / "fixtures"
+VECTOR_ADD_WITH_HOST = (
+    "#include <cuda_runtime.h>\n"
+    + SAMPLE_KERNELS["vector_add.cu"]
+    + "void run(float** d_A, size_t size) {\n"
+    "    cudaMalloc((void**)d_A, size);\n"
+    "    cudaDeviceSynchronize();\n"
+    "    cudaFree(*d_A);\n"
+    "}\n"
+)
 TOOL = hipify.HipifyTool(
     repository=hipify.HIPIFY_REPOSITORY,
     ref=hipify.HIPIFY_REF,
@@ -246,11 +255,11 @@ def test_ensure_hipify_clones_the_pinned_release(
     not os.environ.get("R2R_TEST_HIPIFY_PERL"),
     reason="set R2R_TEST_HIPIFY_PERL to a rocm-7.2.4 bin/hipify-perl to run the real tool",
 )
-def test_real_hipify_perl_translates_fixtures(tmp_path: Path) -> None:
+def test_real_hipify_perl_translates_sample_kernels(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     root.mkdir()
-    for name in ("vector_add.cu", "flash_attention_simplified.cu"):
-        (root / name).write_bytes((FIXTURES / name).read_bytes())
+    (root / "vector_add.cu").write_text(VECTOR_ADD_WITH_HOST, encoding="utf-8")
+    (root / "attention.cu").write_text(SAMPLE_KERNELS["attention.cu"], encoding="utf-8")
     (root / "ext.cu").write_text(
         "#include <ATen/cuda/CUDAContext.h>\n"
         "__global__ void k(float* x) {}\n"

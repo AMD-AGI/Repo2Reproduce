@@ -8,7 +8,7 @@ test, not by this report.
 
 Adapted from ROCmPort-AI ``backend/tools/static_analyzer.py``
 (https://github.com/tazwaryayyyy/ROCmPort-AI, commit 943d16c), Copyright 2026 Tazwar Ahnaf
-Enan, licensed under the Apache License 2.0 (see ``fixtures/LICENSE-ROCmPort-AI``).
+Enan, licensed under the Apache License 2.0 (see ``LICENSE-ROCmPort-AI`` in this package).
 Modified for Repo2Reproduce: rules, severities and hints rewritten for ROCm 7.2 semantics,
 comment-aware matching, repository-wide scanning with file and line locations, and new
 build-script, Python-import, FP8 and shared-memory checks.

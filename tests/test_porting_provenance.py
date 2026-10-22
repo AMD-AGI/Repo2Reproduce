@@ -13,9 +13,9 @@ from repo2reproduce.executor import ManifestExecutionError, validate_porting_fil
 from repo2reproduce.porting import official_hipify as hipify
 from repo2reproduce.porting import provenance
 from repo2reproduce.schemas import RocmPortingManifest, RocmPortReport
+from tests.test_porting_official_hipify import VECTOR_ADD_WITH_HOST
 from tests.test_porting_pipeline import _ported_ready_payload, _script
 
-FIXTURES = Path(hipify.__file__).parent / "fixtures"
 CUDA_SOURCE = """#include <cuda_runtime.h>
 template <int N>
 __global__ void __launch_bounds__(256) score_kernel(const int* a, const int* b, float* out) {
@@ -159,7 +159,7 @@ def test_real_hipify_translation_is_its_own_provenance(
     )
     workspace = tmp_path / "workspace"
     (workspace / "repo").mkdir(parents=True)
-    (workspace / "repo" / "vector_add.cu").write_bytes((FIXTURES / "vector_add.cu").read_bytes())
+    (workspace / "repo" / "vector_add.cu").write_text(VECTOR_ADD_WITH_HOST, encoding="utf-8")
     translated = provenance.translate_file(tool, workspace / "repo" / "vector_add.cu")
     assert "hipMalloc" in translated and "cudaMalloc" not in translated
     (workspace / "port").mkdir()

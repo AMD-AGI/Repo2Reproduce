@@ -6,7 +6,5 @@
 * ``provenance``: checks that a ``hipify_with_fixes`` port derives from the pinned HIPIFY
   translation of its CUDA source.
 
-``fixtures/*.cu`` are unmodified copies of ROCmPort-AI's ``backend/demo_kernels``
-(https://github.com/tazwaryayyyy/ROCmPort-AI, commit 943d16c), Copyright 2026 Tazwar Ahnaf
-Enan, Apache License 2.0; see ``fixtures/LICENSE-ROCmPort-AI``.
+``scanner`` is adapted from ROCmPort-AI (Apache License 2.0); see ``LICENSE-ROCmPort-AI``.
 """
