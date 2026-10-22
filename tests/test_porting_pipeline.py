@@ -396,6 +396,28 @@ def test_preparation_output_model_is_the_forced_variant() -> None:
     assert preparation_stage_model(True, True) is ForcedPortingPreparationStageOutput
 
 
+def test_run_root_spellings_of_porting_paths_are_rebased(tmp_path: Path) -> None:
+    _paper(tmp_path)
+    target = _target(tmp_path)
+    audit = _audit(tmp_path, target)
+    (tmp_path / "configuration_audit.json").write_text(audit.model_dump_json(), encoding="utf-8")
+    payload = _ported_ready_payload(_script(tmp_path), log_path="artifacts/parity/parity.log")
+    port = payload["rocm_port"]
+    port["patches"] = ["workspace/docker/rocm_port.py"]
+    port["ported_kernels"][0]["cuda_source"] = "workspace/repo/csrc/tp.cu"
+    port["ported_kernels"][0]["port_files"] = ["workspace/repo-hip/csrc/tp.cu"]
+    raw = {"environment": {"status": "ready"}, "manifest": payload}
+
+    normalized = pipeline._normalize_preparation_output(
+        raw, run_dir=tmp_path, target=target, audit=audit
+    )["manifest"]["rocm_port"]
+
+    assert normalized["patches"] == ["docker/rocm_port.py"]
+    assert normalized["ported_kernels"][0]["cuda_source"] == "repo/csrc/tp.cu"
+    assert normalized["ported_kernels"][0]["port_files"] == ["repo-hip/csrc/tp.cu"]
+    assert normalized["parity_check"]["log_path"] == "parity/parity.log"
+
+
 def test_repair_output_keeps_the_porting_manifest() -> None:
     assert execution_repair_model(False) is ExecutionRepairOutput
     for rocm_porting, force, manifest_model in (

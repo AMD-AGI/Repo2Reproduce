@@ -517,7 +517,35 @@ def _normalize_preparation_output(
     manifest["audit_sha256"] = sha256_file(run_dir / "configuration_audit.json")
     manifest["repository_commit"] = audit.repository_commit
     manifest["environment_sha256"] = None
+    rocm_port = manifest.get("rocm_port")
+    if isinstance(rocm_port, dict):
+        _normalize_rocm_port_paths(rocm_port)
     return output
+
+
+def _normalize_rocm_port_paths(rocm_port: dict[str, Any]) -> None:
+    """Rebase run-root-relative spellings onto the porting record's own path roots.
+
+    Other manifest paths are run-root-relative, but ``rocm_port`` files are relative to the
+    host workspace and the parity log to ``/run/artifacts``.
+    """
+
+    def workspace_path(value: Any) -> Any:
+        return value.removeprefix("workspace/") if isinstance(value, str) else value
+
+    if isinstance(rocm_port.get("patches"), list):
+        rocm_port["patches"] = [workspace_path(path) for path in rocm_port["patches"]]
+    for kernel in rocm_port.get("ported_kernels") or []:
+        if not isinstance(kernel, dict):
+            continue
+        kernel["cuda_source"] = workspace_path(kernel.get("cuda_source"))
+        if isinstance(kernel.get("port_files"), list):
+            kernel["port_files"] = [workspace_path(path) for path in kernel["port_files"]]
+    parity = rocm_port.get("parity_check")
+    if isinstance(parity, dict) and isinstance(parity.get("log_path"), str):
+        parity["log_path"] = (
+            parity["log_path"].removeprefix("/run/artifacts/").removeprefix("artifacts/")
+        )
 
 
 def _migrate_legacy_preparation_paths(raw_output: Any, run_dir: Path) -> Any:
