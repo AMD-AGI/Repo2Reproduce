@@ -293,6 +293,23 @@ def validate_execution_repair(
     if manifest.repository_commit != audit.repository_commit:
         errors.append("repair changed the pinned repository commit")
 
+    previous_port = getattr(previous_manifest, "rocm_port", None)
+    if previous_port is not None:
+        repaired_port = getattr(manifest, "rocm_port", None)
+        if repaired_port is None:
+            errors.append("repair dropped the rocm_port record")
+        else:
+            kept = {(item.cuda_source, item.cuda_kernel) for item in repaired_port.ported_kernels}
+            removed = sorted(
+                f"{kernel} ({source})"
+                for source, kernel in (
+                    (item.cuda_source, item.cuda_kernel) for item in previous_port.ported_kernels
+                )
+                if (source, kernel) not in kept
+            )
+            if removed:
+                errors.append("repair removed ported kernels: " + ", ".join(removed))
+
     before_values = {
         item.audit_item_id: item.value for item in previous_manifest.scientific_configuration
     }

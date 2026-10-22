@@ -837,7 +837,7 @@ def _run_smoke_stage(tmp_path: Path, skill: str | None) -> tuple[SmokeTestResult
             max_turns=1,
             max_budget_usd=1,
             validator=lambda output: None,
-            skill=skill,
+            skills=[skill] if skill else [],
         )
     )
 
@@ -869,7 +869,7 @@ def test_structured_stage_requires_its_skill_before_accepting_output(
     assert all(item["tools"] == ["Read"] for item in observed)
     assert "was not loaded with the Skill tool" in str(observed[1]["prompt"])
     stage = json.loads((tmp_path / "metadata.json").read_text())["stages"]["configuration_audit"]
-    assert stage["skill"] == runner.CONFIGURATION_AUDIT_SKILL
+    assert stage["skills"] == [runner.CONFIGURATION_AUDIT_SKILL]
     assert stage["attempts"] == 2
 
 

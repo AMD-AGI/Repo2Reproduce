@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
-from repo2reproduce import runner
+from repo2reproduce import pipeline, runner
 from repo2reproduce.executor import ManifestExecutionError, execute_manifest, validate_porting_files
 from repo2reproduce.pipeline import replay_preparation_artifacts
 from repo2reproduce.porting.official_hipify import (
@@ -19,16 +21,24 @@ from repo2reproduce.porting.official_hipify import (
     HIPIFY_REPOSITORY,
     HipifyTool,
 )
-from repo2reproduce.runner import initialize_run, porting_policy_prompt
+from repo2reproduce.runner import (
+    ROCM_PORTING_SKILL,
+    SKILLS_DIR,
+    initialize_run,
+    porting_policy_prompt,
+)
 from repo2reproduce.schemas import (
     PORTING_LADDER,
     EnvironmentManifest,
     ExecutionManifest,
+    ExecutionRepairOutput,
     ForcedKernelPortingManifest,
     ForcedPortingPreparationStageOutput,
     RocmPortingManifest,
+    execution_repair_model,
     preparation_stage_model,
 )
+from repo2reproduce.validators import StageValidationError, sha256_file, validate_execution_repair
 from tests.test_pipeline import _audit, _code_ref, _paper, _repository, _resolved_inputs, _target
 
 
@@ -272,7 +282,10 @@ def test_initialize_run_installs_porting_tools_only_when_requested(
     policy = porting_policy_prompt(str(tmp_path / "porting" / "workspace"), force_kernel_port=True)
     assert "FORCED KERNEL PORT" in policy
     assert "port-scan CLONE" in policy
-    assert "never call `torch.utils.hipify`" in policy
+    assert f"Invoke the `{ROCM_PORTING_SKILL}` skill" in policy
+    skill = (SKILLS_DIR / ROCM_PORTING_SKILL / "SKILL.md").read_text(encoding="utf-8")
+    assert "Never call `torch.utils.hipify`" in skill
+    assert "No PyTorch fallback" in skill
     plain = porting_policy_prompt(str(tmp_path / "workspace"), force_kernel_port=False)
     assert "STANDARD PORTING" in plain
     assert "FORCED KERNEL PORT" not in plain
@@ -381,3 +394,151 @@ def test_cli_rejects_forced_port_without_porting_mode(monkeypatch: pytest.Monkey
 
 def test_preparation_output_model_is_the_forced_variant() -> None:
     assert preparation_stage_model(True, True) is ForcedPortingPreparationStageOutput
+
+
+def test_repair_output_keeps_the_porting_manifest() -> None:
+    assert execution_repair_model(False) is ExecutionRepairOutput
+    for rocm_porting, force, manifest_model in (
+        (True, False, RocmPortingManifest),
+        (True, True, ForcedKernelPortingManifest),
+    ):
+        model = execution_repair_model(rocm_porting, force)
+        assert model.model_fields["manifest"].annotation is manifest_model
+        assert "rocm_port" in json.dumps(model.model_json_schema())
+
+
+class _StopStage(Exception):
+    pass
+
+
+def _capture_stage_skills(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    observed: list[list[str]] = []
+
+    async def fake_stage(*args: object, skills: list[str], **kwargs: object) -> None:
+        observed.append(list(skills))
+        raise _StopStage
+
+    monkeypatch.setattr(pipeline, "_run_structured_stage", fake_stage)
+    return observed
+
+
+@pytest.mark.parametrize(
+    ("rocm_porting", "expected"),
+    [(False, []), (True, [ROCM_PORTING_SKILL])],
+)
+def test_preparation_enables_the_porting_skill_only_in_porting_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rocm_porting: bool,
+    expected: list[str],
+) -> None:
+    _paper(tmp_path)
+    _repository(tmp_path)
+    target = _target(tmp_path)
+    audit = _audit(tmp_path, target)
+    (tmp_path / "configuration_audit.json").write_text(audit.model_dump_json(), encoding="utf-8")
+    observed = _capture_stage_skills(monkeypatch)
+
+    with pytest.raises(_StopStage):
+        asyncio.run(
+            pipeline.prepare_environment(
+                tmp_path,
+                target=target,
+                audit=audit,
+                timeout_seconds=60,
+                assigned_gpu="0",
+                model="test",
+                max_turns=1,
+                max_budget_usd=1,
+                rocm_porting=rocm_porting,
+            )
+        )
+
+    assert observed == [expected]
+    prompt = (tmp_path / "prompts" / "environment_preparation.md").read_text(encoding="utf-8")
+    assert (f"`{ROCM_PORTING_SKILL}` skill" in prompt) is rocm_porting
+
+
+def test_porting_repair_loads_both_skills_and_the_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _paper(tmp_path)
+    _repository(tmp_path)
+    target = _target(tmp_path)
+    audit = _audit(tmp_path, target)
+    (tmp_path / "configuration_audit.json").write_text(audit.model_dump_json(), encoding="utf-8")
+    (tmp_path / "metadata.json").write_text('{"stages": {}}', encoding="utf-8")
+    manifest = RocmPortingManifest.model_validate(_ported_ready_payload(_script(tmp_path)))
+    environment = EnvironmentManifest(status="blocked", blocked_reason="not built in this test")
+
+    def fake_patch(run_dir: Path, audit: object, attempt: int) -> tuple[str, str, list[str]]:
+        patch = run_dir / "execution_repairs" / f"repair-{attempt}.patch"
+        patch.parent.mkdir(parents=True, exist_ok=True)
+        patch.write_text("", encoding="utf-8")
+        return patch.relative_to(run_dir).as_posix(), "0" * 64, []
+
+    monkeypatch.setattr(pipeline, "_capture_repository_patch", fake_patch)
+    observed = _capture_stage_skills(monkeypatch)
+
+    with pytest.raises(_StopStage):
+        asyncio.run(
+            pipeline.repair_execution(
+                tmp_path,
+                target=target,
+                audit=audit,
+                environment=environment,
+                manifest=manifest,
+                failed_result=SimpleNamespace(log_path="logs/executor.log"),
+                attempt=1,
+                max_repairs=2,
+                failure_fingerprint="0" * 64,
+                assigned_gpu="0",
+                model="test",
+                max_turns=1,
+                max_budget_usd=1,
+                rocm_porting=True,
+                force_kernel_port=True,
+            )
+        )
+
+    assert observed == [[runner.EXECUTION_REPAIR_SKILL, ROCM_PORTING_SKILL]]
+    prompt = (tmp_path / "prompts" / "execution_repair-1.md").read_text(encoding="utf-8")
+    assert "FORCED KERNEL PORT" in prompt
+    assert f"`{ROCM_PORTING_SKILL}` skill" in prompt
+
+
+def test_repair_cannot_drop_a_ported_kernel(tmp_path: Path) -> None:
+    _paper(tmp_path)
+    target = _target(tmp_path)
+    audit = _audit(tmp_path, target)
+    (tmp_path / "configuration_audit.json").write_text(audit.model_dump_json(), encoding="utf-8")
+    script = _script(tmp_path)
+    previous = RocmPortingManifest.model_validate(_ported_ready_payload(script))
+    repaired_payload = _ported_ready_payload(script)
+    repaired_payload["rocm_port"]["ported_kernels"][0]["cuda_kernel"] = "other_kernel"
+    repaired = RocmPortingManifest.model_validate(repaired_payload)
+    output = SimpleNamespace(
+        repair=SimpleNamespace(
+            attempt=1,
+            failure_fingerprint="0" * 64,
+            changes=[],
+            smoke_test=SimpleNamespace(exit_code=0, log_path="artifacts/smoke/smoke.log"),
+            repository_patch=SimpleNamespace(
+                base_commit=audit.repository_commit, diff_path="missing.patch", diff_sha256=""
+            ),
+        ),
+        environment=SimpleNamespace(status="ready"),
+    )
+
+    common = {
+        "attempt": 1,
+        "failure_fingerprint": "0" * 64,
+        "target_sha256": sha256_file(tmp_path / "target.json"),
+        "audit_sha256": sha256_file(tmp_path / "configuration_audit.json"),
+    }
+    output.manifest = repaired
+    with pytest.raises(StageValidationError, match=r"removed ported kernels: tp_forward_kernel"):
+        validate_execution_repair(tmp_path, target, audit, previous, output, **common)
+    output.manifest = ExecutionManifest.model_validate(_base_manifest(script))
+    with pytest.raises(StageValidationError, match="dropped the rocm_port record"):
+        validate_execution_repair(tmp_path, target, audit, previous, output, **common)

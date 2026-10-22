@@ -254,10 +254,13 @@ Claude Code skills under `repo2reproduce/skills/`:
 | Stage | Skill |
 | --- | --- |
 | Configuration audit | `configuration-audit` |
-| Execution repair | `execution-repair` |
+| Environment preparation with `--rocm-porting` | `rocm-kernel-porting` |
+| Execution repair | `execution-repair`, plus `rocm-kernel-porting` with `--rocm-porting` |
 | Finalization | `paper-result-comparison` |
 
-Target selection and environment preparation use prompts only.
+Target selection, and environment preparation without `--rocm-porting`, use prompts only.
+In porting runs the porting skill's no-fallback rule overrides the repair skill's
+substitution allowance, and a repair may not drop `rocm_port` or any ported kernel.
 
 Every run installs the packaged skills into `workspace/.claude/skills/` and records each
 skill's SHA-256 under `skills` in `metadata.json`; recovery reinstalls them from the

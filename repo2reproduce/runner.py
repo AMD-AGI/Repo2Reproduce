@@ -48,6 +48,7 @@ FINALIZATION_TOOLS = ["Read", "Glob", "Grep"]
 CONFIGURATION_AUDIT_SKILL = "configuration-audit"
 EXECUTION_REPAIR_SKILL = "execution-repair"
 RESULT_COMPARISON_SKILL = "paper-result-comparison"
+ROCM_PORTING_SKILL = "rocm-kernel-porting"
 MATCH_TOLERANCE_PERCENT = 5
 
 
@@ -212,7 +213,11 @@ def porting_policy_prompt(workspace: str, *, force_kernel_port: bool) -> str:
     )
     return _render_prompt(
         "rocm_porting.md",
-        {"WORKSPACE": workspace, "PORTING_REQUIREMENT": requirement},
+        {
+            "WORKSPACE": workspace,
+            "PORTING_REQUIREMENT": requirement,
+            "SKILL": ROCM_PORTING_SKILL,
+        },
     )
 
 

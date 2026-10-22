@@ -896,3 +896,27 @@ def preparation_stage_model(
     if rocm_porting:
         return PortingPreparationStageOutput
     return PreparationStageOutput
+
+
+class PortingExecutionRepairOutput(ExecutionRepairOutput):
+    """Execution repair output whose manifest keeps ``rocm_port``."""
+
+    manifest: RocmPortingManifest
+
+
+class ForcedPortingExecutionRepairOutput(ExecutionRepairOutput):
+    """Execution repair output for ``--force-kernel-port``."""
+
+    manifest: ForcedKernelPortingManifest
+
+
+def execution_repair_model(
+    rocm_porting: bool, force_kernel_port: bool = False
+) -> type[ExecutionRepairOutput]:
+    """Select the structured-output model for execution repair."""
+
+    if force_kernel_port:
+        return ForcedPortingExecutionRepairOutput
+    if rocm_porting:
+        return PortingExecutionRepairOutput
+    return ExecutionRepairOutput

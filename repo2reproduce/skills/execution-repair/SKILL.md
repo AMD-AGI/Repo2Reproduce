@@ -86,6 +86,12 @@ metrics, not throughput, latency, or memory), the replacement is numerically equ
 and the diagnosis states the substitution explicitly so the final report can list it as a
 deviation. For performance targets, never replace the implementation under test.
 
+When the stage prompt includes a CUDA-to-ROCm porting policy, the `rocm-kernel-porting`
+skill governs every ported or CUDA-specific kernel, and its no-fallback rule overrides the
+substitution allowance above: never replace a ported kernel with PyTorch, a reference path,
+or a disabled extension, never drop a kernel from the porting record, and re-run the parity
+check whenever kernel code, build flags, or the image change.
+
 If no legitimate repair exists, do not fabricate one. Explain the root cause and why every
 available fix would alter frozen science, and return the manifests as blocked with that
 reason so the failure is reported honestly.

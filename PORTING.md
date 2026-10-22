@@ -18,7 +18,7 @@ Porting mode is the baseline plus three commits on `feature/no-pytorch-fallback`
 
 | | Baseline | `--rocm-porting` | `--rocm-porting --force-kernel-port` |
 |---|---|---|---|
-| Porting policy in the prompt | none | `prompts/rocm_porting.md` | same, with the forced requirement |
+| Porting policy | none | `rocm-kernel-porting` skill plus the thin `prompts/rocm_porting.md` | same, with the forced requirement |
 | Host tools | none | `port-scan`, `port-hipify` | same |
 | Translation | whatever the build does, often `CUDAExtension` auto-hipify | official `hipify-perl` into `<clone>-hip`, then hand rewrites | same |
 | Acceptable outcome | smoke test exits 0 | the first strategy on the ladder that yields the result | `hipify_with_fixes` or `targeted_rewrite` must succeed |
@@ -49,7 +49,9 @@ nohup setsid .venv/bin/python -m repo2reproduce \
 
 ## How porting mode works
 
-Porting mode adds a policy to the environment-preparation prompt (`repo2reproduce/prompts/rocm_porting.md`), two host tools, and validation in the runner and executor. The goal is to port the CUDA-specific code the selected experiment needs while keeping the paper's algorithm, numerical formats, and hyperparameters unchanged.
+Porting mode adds a policy to environment preparation, two host tools, and validation in the runner and executor. The goal is to port the CUDA-specific code the selected experiment needs while keeping the paper's algorithm, numerical formats, and hyperparameters unchanged.
+
+The policy is split in two. The reusable reasoning (the strategy ladder, the no-fallback and no-PyTorch-hipify rules, HIPIFY leftovers, gfx942 fixes, the build recipe, and the parity method) lives in the `rocm-kernel-porting` skill under `repo2reproduce/skills/`, with a gfx942 reference file. The thin `repo2reproduce/prompts/rocm_porting.md` supplies only the run's mode, host-tool rules, workspace contract, and the `rocm_port` fields. Environment preparation enables and must load the skill; execution repair in a porting run loads it together with `execution-repair`, keeps the porting manifest model, and is rejected if it drops `rocm_port` or any ported kernel.
 
 **Baseline:** prepare an image and a smoke test. A passing smoke test becomes a ready manifest; otherwise the run is blocked. Stage 2 runs `launch.sh` and writes `final_report.md`.
 

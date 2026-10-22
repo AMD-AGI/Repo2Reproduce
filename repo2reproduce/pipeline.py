@@ -9,7 +9,7 @@ import json
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
@@ -31,6 +31,7 @@ from .schemas import (
     ExecutionResult,
     PreparationStageOutput,
     TargetContract,
+    execution_repair_model,
     preparation_stage_model,
 )
 from .validators import (
@@ -72,7 +73,7 @@ def _update_stage(
     session_id: str | None = None,
     error: str | None = None,
     increment_attempt: bool = False,
-    skill: str | None = None,
+    skills: Sequence[str] = (),
 ) -> None:
     from .runner import _atomic_json
 
@@ -87,8 +88,8 @@ def _update_stage(
     record["updated_at"] = _utc_now()
     if session_id:
         record["session_id"] = session_id
-    if skill:
-        record["skill"] = skill
+    if skills:
+        record["skills"] = list(skills)
     if error:
         record["error"] = error
     else:
@@ -119,12 +120,12 @@ async def _run_structured_stage(
     validator: Callable[[ModelT], None],
     normalizer: Callable[[Any], Any] | None = None,
     initial_session_id: str | None = None,
-    skill: str | None = None,
+    skills: Sequence[str] = (),
 ) -> tuple[ModelT, str]:
     """Invoke one constrained Claude stage and allow one evidence-based correction.
 
-    ``skill`` names the single project skill exposed to this stage; it must be loaded
-    before the stage output is accepted. Stages without a skill see no skills.
+    ``skills`` names the project skills exposed to this stage; each must be loaded before
+    the stage output is accepted. Stages without skills see none.
     """
 
     from .runner import (
@@ -151,7 +152,7 @@ async def _run_structured_stage(
             "running",
             session_id=session_id,
             increment_attempt=True,
-            skill=skill,
+            skills=skills,
         )
         options_data = _base_options(
             run_dir,
@@ -163,7 +164,7 @@ async def _run_structured_stage(
         options_data.update(
             {
                 "allowed_tools": tools,
-                "skills": [skill] if skill else [],
+                "skills": list(skills),
                 "output_format": {
                     "type": "json_schema",
                     "schema": schema.model_json_schema(),
@@ -179,12 +180,12 @@ async def _run_structured_stage(
             stage=f"{stage}-{attempt}",
             skill_trace=skill_trace,
         )
-        if skill:
-            try:
+        try:
+            for skill in skills:
                 require_skill_available(stage, skill, skill_trace)
-            except SkillUnavailableError as exc:
-                _update_stage(run_dir, stage, "failed", session_id=session_id, error=str(exc))
-                raise
+        except SkillUnavailableError as exc:
+            _update_stage(run_dir, stage, "failed", session_id=session_id, error=str(exc))
+            raise
         session_id = observed_session or session_id
         invocation_failed = False
         if result.is_error:
@@ -205,7 +206,7 @@ async def _run_structured_stage(
                 from .runner import _atomic_json
 
                 _atomic_json(attempt_path, artifact.model_dump(mode="json"))
-                if skill:
+                for skill in skills:
                     require_skill_invoked(skill, skill_trace)
                 validator(artifact)
                 if not session_id:
@@ -485,7 +486,7 @@ async def audit_configuration(
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
         validator=_validate,
-        skill=CONFIGURATION_AUDIT_SKILL,
+        skills=[CONFIGURATION_AUDIT_SKILL],
     )
     _atomic_json(audit_path, output.audit.model_dump(mode="json"))
     _update_stage(run_dir, "configuration_audit", "succeeded", session_id=session_id)
@@ -653,7 +654,7 @@ async def prepare_environment(
     rocm_porting: bool = False,
     force_kernel_port: bool = False,
 ) -> tuple[EnvironmentManifest, ExecutionManifest]:
-    from .runner import _atomic_json, _render_prompt
+    from .runner import ROCM_PORTING_SKILL, _atomic_json, _render_prompt
 
     environment_path = run_dir / "environment_manifest.json"
     manifest_path = run_dir / "execution_manifest.json"
@@ -740,6 +741,7 @@ async def prepare_environment(
         max_budget_usd=max_budget_usd,
         validator=_validate,
         normalizer=_normalize,
+        skills=[ROCM_PORTING_SKILL] if rocm_porting else [],
     )
     _update_stage(run_dir, "environment_preparation", "succeeded", session_id=session_id)
     return output.environment, output.manifest
@@ -963,10 +965,18 @@ async def repair_execution(
     model: str,
     max_turns: int,
     max_budget_usd: float,
+    rocm_porting: bool = False,
+    force_kernel_port: bool = False,
 ) -> tuple[EnvironmentManifest, ExecutionManifest, str]:
     """Ask the preparation agent for one bounded repair and validate it."""
 
-    from .runner import EXECUTION_REPAIR_SKILL, _atomic_json, _render_prompt
+    from .runner import (
+        EXECUTION_REPAIR_SKILL,
+        ROCM_PORTING_SKILL,
+        _atomic_json,
+        _render_prompt,
+        porting_policy_prompt,
+    )
 
     target_sha256 = sha256_file(run_dir / "target.json")
     audit_sha256 = sha256_file(run_dir / "configuration_audit.json")
@@ -997,6 +1007,12 @@ async def repair_execution(
             "SKILL": EXECUTION_REPAIR_SKILL,
         },
     )
+    skills = [EXECUTION_REPAIR_SKILL]
+    if rocm_porting:
+        prompt += "\n" + porting_policy_prompt(
+            str(run_dir / "workspace"), force_kernel_port=force_kernel_port
+        )
+        skills.append(ROCM_PORTING_SKILL)
     prompt_path = run_dir / "prompts" / f"execution_repair-{attempt}.md"
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt, encoding="utf-8")
@@ -1115,7 +1131,7 @@ async def repair_execution(
             run_dir,
             stage=f"execution_repair_{attempt}",
             prompt=prompt,
-            schema=ExecutionRepairOutput,
+            schema=execution_repair_model(rocm_porting, force_kernel_port),
             tools=PREPARATION_TOOLS,
             assigned_gpu=assigned_gpu,
             model=model,
@@ -1124,7 +1140,7 @@ async def repair_execution(
             validator=_validate,
             normalizer=_normalize,
             initial_session_id=preparation_session,
-            skill=EXECUTION_REPAIR_SKILL,
+            skills=skills,
         )
     except Exception:
         (run_dir / "target.json").write_bytes(target_bytes)
@@ -1333,6 +1349,8 @@ async def run_staged_pipeline(run_dir: Path, args: Any, *, recovering: bool = Fa
                         model=model,
                         max_turns=args.max_turns,
                         max_budget_usd=args.max_budget_usd,
+                        rocm_porting=bool(input_data.get("rocm_porting")),
+                        force_kernel_port=bool(input_data.get("force_kernel_port")),
                     )
                 except (RuntimeError, StageValidationError, ValidationError, ValueError) as exc:
                     _update_stage(
