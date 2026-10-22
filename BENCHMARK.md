@@ -11,9 +11,9 @@ runs through a bash script in `scripts/`; the papers live in `dataset/papers.tsv
 | `scripts/run_all.sh` | Reproduce all 22 papers sequentially (or a subset). |
 | `scripts/summarize.sh` | Table of status, verdict, paper value, and reproduced value per run. |
 
-Every script prints its usage with `--help`. The [dataset README](dataset/README.md) lists
-the papers, the file format, and worked examples of each script. `r2r --help` lists the
-underlying command.
+Every script prints its usage with `--help`. The [README](README.md) shows how to run one
+paper, all papers, a target, and a porting mode, with every flag. The
+[dataset README](dataset/README.md) lists the papers and the file format.
 
 ## 1. Set up the environment
 
@@ -94,103 +94,13 @@ Re-run `scripts/setup.sh` after editing `.env`; it warns about missing provider 
 
 ## 2. Run
 
-`--gpu` is the physical GPU index as listed by `rocm-smi`. Inside each container that GPU
-is device 0. Runs take from tens of minutes to many hours; `--timeout-seconds` (default
-14400, set per paper in the dataset) bounds only the final execution, not the agent
-stages before it.
+The [README](README.md) covers running:
 
-### 2.1 List the papers
-
-```bash
-scripts/list_papers.sh
-```
-
-### 2.2 One paper
-
-By dataset id or name, using the dataset's porting mode and default target:
-
-```bash
-scripts/run_one.sh 9 --gpu 0
-scripts/run_one.sh convolutional-diffusion --gpu 0     # same paper, by name
-```
-
-Run in the background and come back later:
-
-```bash
-scripts/run_one.sh nsnquant --gpu 1 --detach
-tail -f "$R2R_RUNS_ROOT"/21-nsnquant-*.log
-```
-
-A paper that is not in the dataset:
-
-```bash
-scripts/run_one.sh --paper https://arxiv.org/abs/<id> --repo https://github.com/<org>/<repo> --gpu 0
-```
-
-Print the exact `r2r` command without running it with `--dry-run`. Arguments after `--`
-are passed to `r2r` unchanged, for example `-- --max-execution-repairs 1`.
-
-### 2.3 One paper with a specific target experiment
-
-`--target` names the result to reproduce and overrides the dataset's target column. Name
-the table, row, column, or figure; leave hyperparameters out, since discovering them is
-the configuration audit's job.
-
-```bash
-scripts/run_one.sh cogs --gpu 0 \
-  --target "Reproduce Table 2, the d=71 modular-addition row."
-
-scripts/run_one.sh convolutional-diffusion --gpu 0 \
-  --target "Reproduce Table 1, the CIFAR10 ResNet ELS correlation."
-
-scripts/run_one.sh sageattention --gpu 2 --porting force \
-  --target "Reproduce the attention accuracy (cosine similarity and relative L1 against full-precision attention) of the official SageAttention INT8 CUDA kernel, ported to ROCm."
-```
-
-`--no-target` ignores the dataset target and lets the agent choose a central, locally
-reproducible result. `--porting none|rocm|force` overrides the dataset's porting mode
-(`rocm` = `--rocm-porting`, `force` = `--rocm-porting --force-kernel-port`; see
-[PORTING.md](PORTING.md)). `--prepare-only` stops after the environment is built and the
-execution manifest is frozen, without running the experiment.
-
-### 2.4 All 22 papers, sequentially
-
-```bash
-scripts/run_all.sh --gpu 0 --detach
-tail -f "$R2R_RUNS_ROOT"/batch-*/batch.log
-```
-
-Without `--detach` the batch runs in the foreground; use `tmux` or `screen` so it survives
-a closed terminal. Papers run one after another on the same GPU. A failed or blocked paper
-does not stop the batch unless you pass `--stop-on-error`.
-
-Useful variants:
-
-```bash
-scripts/run_all.sh --gpu 0 --only 5,9,nsnquant        # a subset, in dataset order
-scripts/run_all.sh --gpu 0 --skip 10,refersplat       # everything except these
-scripts/run_all.sh --gpu 0 --no-targets               # agent chooses every result
-scripts/run_all.sh --gpu 0 --prepare-only             # build and freeze, do not execute
-scripts/run_all.sh --dry-run                          # print the 22 commands only
-```
-
-To use several GPUs, start one batch per GPU on disjoint subsets:
-
-```bash
-scripts/run_all.sh --gpu 0 --only 1,2,3,4,5,6,7,8,9,10,11 --detach
-scripts/run_all.sh --gpu 1 --only 12,13,14,15,16,17,18,19,20,21,22 --detach
-```
-
-### 2.5 Resume an interrupted run
-
-A run that stopped (crash, reboot, interrupted agent) resumes from its first incomplete
-stage. Paper, repository, target, and porting mode come from the run directory:
-
-```bash
-scripts/run_one.sh --recover "$R2R_RUNS_ROOT/9-convolutional-diffusion-20261022-101500" --gpu 0
-```
-
-To retry a whole paper from scratch, run it again; each run gets a new timestamped id.
+- [one paper](README.md#run-one-paper), by dataset id, name, or URLs;
+- [all papers sequentially](README.md#run-all-papers-sequentially), or a subset, on one or more GPUs;
+- [a specific target](README.md#target) with `--target` or `--no-target`;
+- [a porting mode](README.md#porting) with `--porting none|rocm|force`;
+- [resuming an interrupted run](README.md#run-one-paper) with `--recover`.
 
 ## 3. Outputs and where they are
 
