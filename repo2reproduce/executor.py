@@ -12,12 +12,15 @@ import subprocess
 import time
 from pathlib import Path
 
+from .porting import provenance
+from .porting.official_hipify import HipifyTool
 from .schemas import (
     ExecutionManifest,
     ExecutionResult,
     ForcedKernelPortingManifest,
     PortedKernel,
     RocmPortingManifest,
+    RocmPortReport,
 )
 
 _KERNEL_DEFINITION = {
@@ -114,6 +117,7 @@ def validate_porting_files(run_dir: Path, manifest: RocmPortingManifest) -> None
             raise ManifestExecutionError(f"porting patch must be a regular file: {relative}")
     for kernel in port.ported_kernels:
         _validate_ported_kernel(workspace, kernel)
+    _validate_hipify_provenance(run_dir, port)
     if port.parity_check is not None:
         parity_log = _inside(run_dir / "artifacts", port.parity_check.log_path, must_exist=True)
         if not parity_log.is_file() or parity_log.stat().st_size == 0:
@@ -125,6 +129,52 @@ def validate_porting_files(run_dir: Path, manifest: RocmPortingManifest) -> None
                 raise ManifestExecutionError(
                     f"forced kernel port requires a non-empty {name} report"
                 )
+
+
+def _validate_hipify_provenance(run_dir: Path, port: RocmPortReport) -> None:
+    """Require each ``hipify_with_fixes`` kernel to derive from the pinned HIPIFY output."""
+
+    kernels = [
+        kernel for kernel in port.ported_kernels
+        if port.kernel_strategy(kernel) == "hipify_with_fixes"
+    ]
+    if not kernels:
+        return
+    try:
+        recorded = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))["hipify"]
+        tool = HipifyTool(**recorded)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ManifestExecutionError(
+            "hipify_with_fixes ports need the run's pinned HIPIFY record in metadata.json"
+        ) from exc
+    evidence_dir = run_dir / "artifacts" / "hipify-provenance"
+    results = []
+    for kernel in kernels:
+        _inside(run_dir / "workspace", kernel.cuda_source, must_exist=True)
+        try:
+            result = provenance.check_kernel(
+                workspace=run_dir / "workspace",
+                cuda_kernel=kernel.cuda_kernel,
+                cuda_source=kernel.cuda_source,
+                port_files=kernel.port_files,
+                tool=tool,
+                evidence_dir=evidence_dir,
+            )
+        except (provenance.ProvenanceError, OSError, subprocess.SubprocessError) as exc:
+            raise ManifestExecutionError(str(exc)) from exc
+        results.append(result.to_dict())
+    (evidence_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "hipify": {"repository": tool.repository, "ref": tool.ref, "commit": tool.commit},
+                "minimum_overlap": provenance.MIN_HIPIFY_OVERLAP,
+                "kernels": results,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _read_regular_file(workspace: Path, relative: str, role: str) -> str:

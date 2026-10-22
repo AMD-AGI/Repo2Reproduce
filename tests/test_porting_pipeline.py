@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from repo2reproduce import pipeline, runner
 from repo2reproduce.executor import ManifestExecutionError, execute_manifest, validate_porting_files
 from repo2reproduce.pipeline import replay_preparation_artifacts
+from repo2reproduce.porting import provenance
 from repo2reproduce.porting.official_hipify import (
     HIPIFY_COMMIT,
     HIPIFY_REF,
@@ -131,7 +132,32 @@ def _blocked_porting_payload(reason: str, **port: Any) -> dict[str, Any]:
     }
 
 
+@pytest.fixture(autouse=True)
+def _untranslating_hipify(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for the pinned hipify-perl, which these tests do not install."""
+
+    monkeypatch.setattr(
+        provenance,
+        "translate_file",
+        lambda tool, source: source.read_text(encoding="utf-8"),
+    )
+
+
+def _pin_hipify(run_dir: Path) -> None:
+    metadata_path = run_dir / "metadata.json"
+    metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
+    metadata["hipify"] = {
+        "repository": HIPIFY_REPOSITORY,
+        "ref": HIPIFY_REF,
+        "commit": HIPIFY_COMMIT,
+        "script": str(run_dir / "tools" / "hipify-perl"),
+    }
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+
 def _write_port_sources(run_dir: Path) -> None:
+    _pin_hipify(run_dir)
     workspace = run_dir / "workspace"
     for relative, kernel in (
         ("repo/csrc/tp.cu", "__global__ void tp_forward_kernel(float* out) {}\n"),

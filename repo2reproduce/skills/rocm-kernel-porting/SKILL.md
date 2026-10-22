@@ -29,6 +29,10 @@ forced-kernel mode, which host tools exist, and how the porting record must be r
   and loses edits made inside it. Keep every source change in a patch file or idempotent
   edit script under the host workspace, applied by the Dockerfile or launch script on top
   of the translated copy.
+- **Label the strategy truthfully.** A `hipify_with_fixes` kernel is HIPIFY's translation
+  with targeted fixes, not new code. The runner re-translates the CUDA source with the
+  pinned HIPIFY and rejects a port whose kernel body no longer derives from it. If you
+  rewrote a kernel, record it as `targeted_rewrite`.
 - **The paper's kernel is what gets measured.** For latency, throughput, or memory targets,
   the timed call must reach the ported kernel. Cite evidence that it did (call counts,
   profiler kernel names, or a control experiment) rather than assuming it.

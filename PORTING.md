@@ -65,7 +65,11 @@ When `--rocm-porting` is set, `initialize_run` in `repo2reproduce/runner.py`:
 - clones [ROCm/HIPIFY](https://github.com/ROCm/HIPIFY) at `rocm-7.2.4` into `<run>/tools/HIPIFY-rocm-7.2.4`, verifies commit `fd26301`, and records both in `metadata.json`;
 - installs `port-scan` and `port-hipify` in `<run>/bin`, on the agent's PATH.
 
-To use another HIPIFY release, change `HIPIFY_REF` and `HIPIFY_COMMIT` in `repo2reproduce/porting/official_hipify.py`. The profiler in `repo2reproduce/porting/profiler.py` is not installed for the agent.
+To use another HIPIFY release, change `HIPIFY_REF` and `HIPIFY_COMMIT` in `repo2reproduce/porting/official_hipify.py`.
+
+`official_hipify.py` does not translate anything itself. It clones and verifies the pinned checkout, copies the clone to `<clone>-hip`, and runs the real tool on every CUDA source, `perl <run>/tools/HIPIFY-rocm-7.2.4/bin/hipify-perl -print-stats -o=<copy> -- <source>`. It then turns the tool's statistics and warnings into the `port-hipify` report.
+
+**Provenance check.** A kernel recorded as `hipify_with_fixes` must be HIPIFY's output with fixes applied, not a rewrite under that label. Before execution, the executor translates the kernel's CUDA source again with the pinned `hipify-perl` and compares the kernel body in the port file with the body in that fresh translation. The port is rejected when fewer than half of HIPIFY's kernel lines survive (`MIN_HIPIFY_OVERLAP` in `repo2reproduce/porting/provenance.py`). The full translation-to-port diff and a `summary.json` with the overlap are saved under `artifacts/hipify-provenance/`. A genuine rewrite is still allowed when recorded as `targeted_rewrite`; when both kernel strategies succeeded, each entry in `ported_kernels` must name its own `strategy`.
 
 ### 2. Clone the repository and run both tools
 

@@ -47,7 +47,7 @@ def test_hook_allows_only_a_single_porting_command(tmp_path: Path) -> None:
     assert decide("port-scan /tmp/repo; rm -rf /") == "deny"
     assert decide("port-scan $(pwd)") == "deny"
     assert decide("cd /tmp && port-scan repo") == "deny"
-    assert decide("python -m repo2reproduce.porting.profiler") == "deny"
+    assert decide("python -m repo2reproduce.porting.scanner") == "deny"
 
 
 def test_scan_stays_inside_the_workspace(

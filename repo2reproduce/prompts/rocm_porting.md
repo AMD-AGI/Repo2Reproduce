@@ -48,10 +48,14 @@ Record the porting work in the manifest's `rocm_port` object:
   entry per CUDA kernel the selected entrypoint launches: `cuda_kernel` (the kernel or
   launcher name as written in the CUDA source), `cuda_source` (its file in the clone,
   relative to the host workspace), `implementation` (`hip`, `triton`, `composable_kernel`,
-  or `rocwmma`), and `port_files` (files relative to the host workspace that define the
-  replacement kernel). Before execution the runner checks that `cuda_source` mentions
+  or `rocwmma`), `port_files` (files relative to the host workspace that define the
+  replacement kernel), and `strategy` (`hipify_with_fixes` or `targeted_rewrite`, required
+  when both succeeded). Before execution the runner checks that `cuda_source` mentions
   `cuda_kernel` and that a port file defines a kernel in the declared language
-  (`__global__`, `@triton.jit`, `ck::`, or `rocwmma::`).
+  (`__global__`, `@triton.jit`, `ck::`, or `rocwmma::`). For each `hipify_with_fixes`
+  kernel it also re-translates `cuda_source` with the pinned `hipify-perl` and requires the
+  port file's kernel body to keep at least half of the translated kernel's lines; the diff
+  is saved under `artifacts/hipify-provenance/`.
 - `parity_check`: `reference`, `inputs`, `error_metric` (lower is better),
   `observed_error`, `tolerance`, and `log_path` relative to /run/artifacts.
 

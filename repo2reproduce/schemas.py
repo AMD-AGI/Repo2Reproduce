@@ -753,6 +753,10 @@ class PortedKernel(BaseModel):
     cuda_source: str
     implementation: KernelImplementation
     port_files: list[str] = Field(min_length=1)
+    strategy: Literal["hipify_with_fixes", "targeted_rewrite"] | None = Field(
+        default=None,
+        description="How this kernel was ported; required when both kernel strategies succeeded.",
+    )
 
     @model_validator(mode="after")
     def validate_paths(self) -> PortedKernel:
@@ -795,7 +799,34 @@ class RocmPortReport(BaseModel):
             raise ValueError(
                 "rocm_port records ported code, so uses_cuda_specific_code must be true"
             )
+        succeeded = self.succeeded_kernel_strategies()
+        for kernel in self.ported_kernels:
+            if kernel.strategy is not None and kernel.strategy not in succeeded:
+                raise ValueError(
+                    f"ported kernel {kernel.cuda_kernel} names strategy {kernel.strategy}, "
+                    "which has no succeeded attempt"
+                )
+            if kernel.strategy is None and len(succeeded) > 1:
+                raise ValueError(
+                    f"both kernel strategies succeeded, so ported kernel {kernel.cuda_kernel} "
+                    "must name its strategy"
+                )
         return self
+
+    def succeeded_kernel_strategies(self) -> set[str]:
+        return {
+            attempt.strategy
+            for attempt in self.attempts
+            if attempt.outcome == "succeeded" and attempt.strategy in KERNEL_PORT_STRATEGIES
+        }
+
+    def kernel_strategy(self, kernel: PortedKernel) -> str | None:
+        """Return how ``kernel`` was ported: its own field or the single kernel strategy."""
+
+        if kernel.strategy is not None:
+            return kernel.strategy
+        succeeded = self.succeeded_kernel_strategies()
+        return next(iter(succeeded)) if len(succeeded) == 1 else None
 
 
 class RocmPortingManifest(ExecutionManifest):

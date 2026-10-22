@@ -3,7 +3,6 @@
 ``port-scan`` reads the cloned repository. ``port-hipify`` translates a copy of the clone with
 AMD's official HIPIFY (``hipify-perl`` from https://github.com/ROCm/HIPIFY, pinned and cloned
 into ``$RUN_DIR/tools``); it writes only below the run's workspace and never edits the clone.
-The profiler is intentionally not exposed.
 """
 
 from __future__ import annotations
