@@ -9,7 +9,7 @@ HIPIFY leaves these without a warning; rewrite them by hand.
 | CUDA (as written) | ROCm replacement |
 | --- | --- |
 | `#include <ATen/cuda/CUDAContext.h>` | `#include <ATen/hip/HIPContext.h>` |
-| `at::cuda::getCurrentCUDAStream()` | `at::hip::getCurrentHIPStreamMasqueradingAsCUDA()` |
+| `at::cuda::getCurrentCUDAStream()` | `at::hip::getCurrentHIPStreamMasqueradingAsCUDA()` (declared in `ATen/hip/impl/HIPStreamMasqueradingAsCUDA.h`; `at::hip` aliases `c10::hip`) |
 | `c10::cuda::CUDAGuard` / `OptionalCUDAGuard` | `c10::hip::HIPGuardMasqueradingAsCUDA` / `OptionalHIPGuardMasqueradingAsCUDA` |
 | `#include <c10/cuda/CUDAGuard.h>` | `#include <c10/hip/HIPGuard.h>` plus `ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h` |
 | `C10_CUDA_KERNEL_LAUNCH_CHECK()` | `C10_HIP_KERNEL_LAUNCH_CHECK()` |
