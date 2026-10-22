@@ -8,7 +8,12 @@ The host needs:
 - Git and curl;
 - Java 11 or newer for OpenDataLoader PDF;
 - the Claude Code `claude` executable;
-- Docker and a working ROCm driver for GPU execution.
+- Docker and a working ROCm driver for GPU execution;
+- for `--rocm-porting` runs, `perl` and access to GitHub (the runner clones the pinned
+  official [ROCm/HIPIFY](https://github.com/ROCm/HIPIFY) release into each run);
+- free disk space where runs are written (see section 4): a run holds the cloned
+  repository, model and dataset caches, and every output the experiment writes, which can
+  reach tens of gigabytes.
 
 Verify the execution host:
 
@@ -83,56 +88,104 @@ Optional settings:
 ```dotenv
 R2R_AUTH_USER=<gateway-user>
 R2R_CLI_BIN_DIR=/home/<user>/.local/bin
+R2R_RUNS_ROOT=/path/with/space/r2r-runs
 R2R_MAX_TURNS=200
 R2R_MAX_BUDGET_USD=100.0
 ```
 
+`R2R_MAX_TURNS` and `R2R_MAX_BUDGET_USD` limit each agent call (every stage attempt)
+separately, not the whole run.
+
 Do not commit `.env`.
 
-## 4. Run an example
+## 4. Where runs are saved
+
+Every run gets its own directory, `<runs-root>/<run-id>/`. The runs root is chosen in this
+order:
+
+1. `--runs-root <dir>` on the command line;
+2. `R2R_RUNS_ROOT` in `.env` or the environment;
+3. the default, `<checkout>/runs/multi-step` (ignored by git).
+
+Use a runs root **outside the repository checkout**, on a disk with plenty of space.
+Agents run with the run's `workspace/` as their working directory, and Claude Code also
+loads `CLAUDE.md` files from parent directories. A run below the checkout therefore
+inherits the repository's own `CLAUDE.md`, whose instructions (for example the
+`mcp__r2r__*` tools) do not apply to this pipeline and end up as spurious gaps in reports.
+
+The run ID defaults to `two-stage-<UTC timestamp>-<repository name>`. Initialization
+rejects a run directory that already exists and is not empty, so give each run a unique
+`--run-id`.
+
+## 5. Run an example
 
 The target should identify the paper result—such as a table, row, dataset, and method—
 without supplying the hyperparameters that the configuration-audit stage is intended to
-discover.
+discover. Omit `--target` to let the agent choose a central, locally reproducible result.
+
+Target selection keeps only requirements it can quote from the paper. Operational
+instructions in `--target` that the paper does not state (batch-size grids, repeat counts,
+memory caps, extra checks) are recorded as warnings and are not enforced on the launch.
 
 Example: reproduce the Table 2 `d=23` modular-addition row:
 
 ```bash
+export R2R_RUNS_ROOT=/path/with/space/r2r-runs
 RUN_ID="cogs-d23-$(date -u +%Y%m%d-%H%M%S)"
 
 .venv/bin/r2r \
   "https://arxiv.org/abs/2410.01779" \
   "https://github.com/facebookresearch/luckmatters/tree/yuandong3/ssl/real-dataset" \
   --run-id "$RUN_ID" \
-  --runs-root /dev/shm/machaita/Repo2ReproduceData \
   --gpu 0 \
   --target "Reproduce Table 2, the d=23 modular-addition row." \
   --timeout-seconds 14400
 ```
 
-The equivalent module invocation starts with:
+The run is written to `$R2R_RUNS_ROOT/$RUN_ID/`. The equivalent module invocation starts
+with:
 
 ```bash
 .venv/bin/python -m repo2reproduce <paper-url> <repository-url> ...
 ```
 
-For a CUDA kernel that must run on ROCm, add `--rocm-porting`. Add `--force-kernel-port` as well when the paper's own CUDA kernel has to be ported with HIPIFY or a targeted rewrite. `PORTING.md` describes the policy, the host tools, and the manifest checks.
+`--gpu` is the physical AMD GPU index on the host; inside every container that GPU is
+device 0. `--timeout-seconds` (default 14400) limits only the final deterministic
+execution of the experiment. Target selection, the configuration audit, environment
+preparation, repairs, and finalization run before or after it and are not counted, so the
+total wall time is longer.
 
-To detach the run:
+For a CUDA kernel that must run on ROCm, add `--rocm-porting`. Add `--force-kernel-port` as
+well when the paper's own CUDA kernel has to be ported with HIPIFY or a targeted rewrite.
+`PORTING.md` describes the policy, the host tools, and the manifest checks.
 
 ```bash
-mkdir -p logs
-nohup setsid .venv/bin/r2r <paper-url> <repository-url> \
+.venv/bin/r2r <paper-url> <repository-url> \
   --run-id "<unique-run-id>" \
-  --runs-root /dev/shm/machaita/Repo2ReproduceData \
   --gpu 0 \
-  --target "<table, row, or result to reproduce>" \
-  > "logs/<unique-run-id>.log" 2>&1 < /dev/null &
+  --rocm-porting \
+  --force-kernel-port \
+  --target "<kernel-centric table, figure, or result>"
 ```
 
-Always use a unique `--run-id`; initialization rejects a non-empty run directory.
+To detach a run and keep its console output next to the run directory:
 
-## 5. Prepare without executing
+```bash
+RUNS_ROOT=/path/with/space/r2r-runs
+RUN_ID="<unique-run-id>"
+mkdir -p "$RUNS_ROOT"
+nohup setsid .venv/bin/r2r <paper-url> <repository-url> \
+  --run-id "$RUN_ID" \
+  --runs-root "$RUNS_ROOT" \
+  --gpu 0 \
+  --target "<table, row, or result to reproduce>" \
+  > "$RUNS_ROOT/$RUN_ID.log" 2>&1 < /dev/null &
+```
+
+Progress is recorded in `$RUNS_ROOT/$RUN_ID/metadata.json` (per-stage status, attempts, and
+skills) and in `logs/agent_messages.jsonl` inside the run directory.
+
+## 6. Prepare without executing
 
 To stop after target selection, configuration reconciliation, environment preparation,
 smoke testing, and execution-manifest creation:
@@ -165,47 +218,64 @@ Repairs may change environment/dependency files, launch scripts, generated confi
 minimal repository source. The selected experiment, metric, paper target, dataset/protocol,
 seeds, sample count, aggregation, and resolved scientific values remain frozen.
 
-## 6. Recover a run
+## 7. Recover a run
 
 Resume from the first incomplete durable stage:
 
 ```bash
 .venv/bin/r2r \
-  --recover-run /path/to/runs-root/<run-id> \
+  --recover-run <runs-root>/<run-id> \
   --gpu 0
 ```
 
-The saved paper URL, repository URL, target, model, and timeout are read from the run
-directory.
+The saved paper URL, repository URL, target, model, timeout, and porting mode are read
+from the run directory, so `paper_url`, `repo_url`, `--rocm-porting`, and
+`--force-kernel-port` cannot be passed again. Recovery reinstalls the packaged skills.
 
-## 7. Run artifacts
+## 8. Run artifacts
 
-Each run is isolated under `<runs-root>/<run-id>/`. Important files include:
+Each run is isolated under `<runs-root>/<run-id>/`:
 
 ```text
-input.json
-metadata.json
-bootstrap.json
-paper_audit.json
-paper/paper.pdf
-paper/paper.md
-paper/paper_parse.json
-workspace/repo/
-workspace/.claude/skills/
-target.json
-configuration_audit.json
-environment_manifest.json
-execution_manifest.json
-execution_result.json
-final_report.json
-final_report.md
-assumptions.json
-stage_attempts/
-execution_repairs/repair-1.json
-execution_repairs/repair-1.patch
-logs/
-artifacts/
+input.json                      run inputs (paper, repository, target, timeout, porting mode)
+metadata.json                   status, per-stage attempts and skills, model, GPU, HIPIFY pin
+bootstrap.json                  clone details, commit, subtree snapshot commit
+paper_audit.json                parsed-paper hashes
+paper/                          paper.pdf, paper.md, paper_parse.json
+prompts/                        rendered stage prompts
+finalize_prompt.txt             rendered finalization prompt
+target.json                     frozen paper target
+configuration_audit.json        paper/code configuration ledger
+environment_manifest.json       image, Dockerfile, build log
+execution_manifest.json         launch script, expected outputs, metric extractor, hashes
+execution_result.json           deterministic execution status and extracted metric
+final_report.json / .md         structured and human-readable report
+assumptions.json                assumptions and paper-unspecified fallbacks
+stage_attempts/                 every structured stage output, per attempt
+execution_repairs/              repair-N.json and repair-N.patch, when repairs ran
+bin/                            docker wrapper; port-scan and port-hipify in porting runs
+cache/                          Hugging Face, Torch, and pip caches mounted into containers
+tools/HIPIFY-rocm-7.2.4/        pinned official HIPIFY (porting runs)
+workspace/repo/                 cloned repository (its own git repo, even for subtrees)
+workspace/repo-hip/             HIPIFY-translated copy (porting runs)
+workspace/execution/launch.sh   exact command executed inside Docker
+workspace/.claude/              Bash hook settings and the installed skills
+logs/agent_messages.jsonl       every agent message, tool call, and result
+logs/bash_tool_calls.jsonl      host Bash commands and the hook's allow/deny decisions
+logs/docker_commands.jsonl      every docker command the agents ran
+logs/executor.log               complete log of the deterministic execution
+artifacts/env/                  build, smoke-test, and parity logs
+artifacts/full-run/             outputs and metric of the full execution
+artifacts/port-scan.*           CUDA scan report (porting runs)
+artifacts/port-hipify.*         HIPIFY translation report (porting runs)
+artifacts/hipify-provenance/    HIPIFY-to-port diffs and overlap summary (hipify_with_fixes)
 ```
+
+Inside containers the run directory is mounted at `/run`, so `/run/workspace` and
+`/run/artifacts` correspond to `workspace/` and `artifacts/` above. Container processes
+run as root, so files they create (for example under `artifacts/full-run/`) are owned by
+root on the host; remove them through Docker, for example
+`docker run --rm -v <run-dir>/artifacts:/a <image> rm -rf /a/full-run`.
 
 `execution_manifest.json` freezes the command, image, launch script, expected outputs,
 metric extractor, and hashes used by deterministic execution.
@@ -223,7 +293,7 @@ repository with one commit holding the pristine upstream files, recorded as
 `clone.snapshot_commit` in `bootstrap.json`. Recovering an older subtree run rebuilds this
 baseline from a fresh clone of the same upstream commit.
 
-## 8. Final report and evidence
+## 9. Final report and evidence
 
 `final_report.md` is the concise user-facing result. It identifies the exact paper
 table/figure location, paper target, applicable baseline, reproduced value, calculation,
@@ -245,7 +315,7 @@ post-execution reporting agent from frozen evidence. Python protects frozen valu
 checks report structure and assumption coverage, but does not reinterpret the scientific
 comparison.
 
-## 9. Stage prompts and skills
+## 10. Stage prompts and skills
 
 Stage prompts in `repo2reproduce/prompts/` supply run-specific paths, frozen values,
 stage boundaries, and output contracts. Reusable, paper-independent reasoning lives in

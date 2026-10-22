@@ -31,19 +31,25 @@ Porting mode is the baseline plus three commits on `feature/no-pytorch-fallback`
 From the `Repo2Reproduce` checkout on a compute node:
 
 ```bash
-mkdir -p logs/two-stage-launches
+RUNS_ROOT=/path/with/space/r2r-runs   # outside the checkout; see HOWTOUSE.md section 4
+mkdir -p "$RUNS_ROOT"
 
 nohup setsid .venv/bin/python -m repo2reproduce \
   https://arxiv.org/abs/2505.18231 \
   https://github.com/DHdroid/NSNQuant \
   --run-id nsnquant \
+  --runs-root "$RUNS_ROOT" \
   --gpu 5 \
   --timeout-seconds 5400 \
   --rocm-porting \
   --force-kernel-port \
   --target "Reproduce Section 4.5 / Figure 4 memory and throughput ..." \
-  > logs/two-stage-launches/nsnquant.log 2>&1 < /dev/null &
+  > "$RUNS_ROOT/nsnquant.log" 2>&1 < /dev/null &
 ```
+
+The run directory is `$RUNS_ROOT/nsnquant/`, and the porting tools, HIPIFY reports, and
+provenance diffs live inside it (`bin/`, `tools/`, `artifacts/port-*`,
+`artifacts/hipify-provenance/`).
 
 `--force-kernel-port` requires `--rocm-porting`. The mode is fixed when a run is created and saved in `input.json` and `metadata.json`; `--recover-run` reuses it and rejects the flags. Creating a porting run needs `git`, `perl`, and GitHub access on the host, because the runner clones HIPIFY. See `HOWTOUSE.md` for the other options.
 
