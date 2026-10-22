@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 # --------------------------------------------------------------------------- #
 # Built-in fallback defaults (vendor-neutral; all overridable via .env).
@@ -37,6 +38,7 @@ _DEFAULT_REASONING_MODEL = "opus"
 _DEFAULT_MAX_BUDGET_USD = 100.0
 _DEFAULT_MAX_TURNS = 200
 _DEFAULT_AUTH_TOKEN = "gateway"
+_DEFAULT_RUNS_ROOT = Path(__file__).resolve().parent.parent / "runs" / "multi-step"
 
 
 # --------------------------------------------------------------------------- #
@@ -191,6 +193,14 @@ def max_turns() -> int:
         except ValueError:
             pass
     return _DEFAULT_MAX_TURNS
+
+
+def runs_root() -> Path:
+    """Directory that holds one subdirectory per run."""
+    env = os.environ.get("R2R_RUNS_ROOT")
+    if env:
+        return Path(env).expanduser()
+    return _DEFAULT_RUNS_ROOT
 
 
 def runtime_extra_path() -> str | None:

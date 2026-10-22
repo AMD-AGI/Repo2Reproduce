@@ -258,6 +258,17 @@ def test_execution_repair_cli_defaults_to_two_and_allows_zero() -> None:
     assert disabled.max_execution_repairs == 0
 
 
+def test_runs_root_defaults_inside_the_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("R2R_RUNS_ROOT", raising=False)
+    default = runner.build_parser().parse_args([]).runs_root
+    assert default == runner.PACKAGE_DIR.parent / "runs" / "multi-step"
+
+    monkeypatch.setenv("R2R_RUNS_ROOT", str(tmp_path / "runs"))
+    assert runner.build_parser().parse_args([]).runs_root == tmp_path / "runs"
+
+
 def test_executor_waits_and_records_success(tmp_path: Path) -> None:
     run_dir, script = _prepared_run(tmp_path)
     manifest = _manifest(script)
@@ -287,6 +298,50 @@ def test_executor_blocks_changed_launch_script(tmp_path: Path) -> None:
 
     assert result.status == "blocked"
     assert "hash does not match" in (result.error or "")
+    assert not (run_dir / "logs" / "fake-docker-argv.txt").exists()
+
+
+def _write_launch_script(script: Path, *lines: str) -> None:
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        + "".join(f"{line}\n" for line in lines)
+        + "mkdir -p /run/artifacts/full-run\n"
+        "python train.py | tee /run/artifacts/full-run/stdout.log\n",
+        encoding="utf-8",
+    )
+
+
+def test_executor_accepts_a_repository_path_composed_from_variables(tmp_path: Path) -> None:
+    run_dir, script = _prepared_run(tmp_path)
+    _write_launch_script(
+        script,
+        "RUN_WS=/run/workspace",
+        'REPO="$RUN_WS/repo"',
+        'cd "$REPO"',
+    )
+
+    result = execute_manifest(run_dir, _manifest(script), assigned_gpu="3")
+
+    assert result.status == "succeeded"
+
+
+def test_executor_blocks_a_launch_script_that_runs_from_a_sibling_directory(
+    tmp_path: Path,
+) -> None:
+    run_dir, script = _prepared_run(tmp_path)
+    (run_dir / "workspace" / "repo-hip").mkdir()
+    _write_launch_script(
+        script,
+        "RUN_WS=/run/workspace",
+        'REPO_HIP="$RUN_WS/repo-hip"',
+        'cd "$REPO_HIP"',
+    )
+
+    result = execute_manifest(run_dir, _manifest(script), assigned_gpu="3")
+
+    assert result.status == "blocked"
+    assert "exact container_repository" in (result.error or "")
     assert not (run_dir / "logs" / "fake-docker-argv.txt").exists()
 
 

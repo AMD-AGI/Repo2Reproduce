@@ -116,6 +116,8 @@ The equivalent module invocation starts with:
 .venv/bin/python -m repo2reproduce <paper-url> <repository-url> ...
 ```
 
+For a CUDA kernel that must run on ROCm, add `--rocm-porting`. Add `--force-kernel-port` as well when the paper's own CUDA kernel has to be ported with HIPIFY or a targeted rewrite. `PORTING.md` describes the policy, the host tools, and the manifest checks.
+
 To detach the run:
 
 ```bash

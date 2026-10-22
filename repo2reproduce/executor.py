@@ -12,7 +12,22 @@ import subprocess
 import time
 from pathlib import Path
 
-from .schemas import ExecutionManifest, ExecutionResult
+from .schemas import (
+    ExecutionManifest,
+    ExecutionResult,
+    ForcedKernelPortingManifest,
+    PortedKernel,
+    RocmPortingManifest,
+)
+
+_KERNEL_DEFINITION = {
+    "hip": re.compile(r"__global__"),
+    "triton": re.compile(r"@triton\.(?:jit|autotune)"),
+    "composable_kernel": re.compile(r"\bck(?:_tile)?::|#\s*include\s*[<\"]ck(?:_tile)?/"),
+    "rocwmma": re.compile(r"\brocwmma::"),
+}
+_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+_VARIABLE_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
 
 
 class ManifestExecutionError(RuntimeError):
@@ -88,11 +103,105 @@ def _stop_labeled_containers(run_id: str) -> None:
         pass
 
 
+def validate_porting_files(run_dir: Path, manifest: RocmPortingManifest) -> None:
+    """Check that the patches and parity log named by a porting manifest exist on the host."""
+
+    port = manifest.rocm_port
+    workspace = run_dir / "workspace"
+    for relative in port.patches:
+        patch = _inside(workspace, relative, must_exist=True)
+        if not patch.is_file():
+            raise ManifestExecutionError(f"porting patch must be a regular file: {relative}")
+    for kernel in port.ported_kernels:
+        _validate_ported_kernel(workspace, kernel)
+    if port.parity_check is not None:
+        parity_log = _inside(run_dir / "artifacts", port.parity_check.log_path, must_exist=True)
+        if not parity_log.is_file() or parity_log.stat().st_size == 0:
+            raise ManifestExecutionError("parity-check log must be a non-empty regular file")
+    if isinstance(manifest, ForcedKernelPortingManifest):
+        for name in ("port-scan.json", "port-hipify.json"):
+            report = _inside(run_dir / "artifacts", name, must_exist=True)
+            if not report.is_file() or report.stat().st_size == 0:
+                raise ManifestExecutionError(
+                    f"forced kernel port requires a non-empty {name} report"
+                )
+
+
+def _read_regular_file(workspace: Path, relative: str, role: str) -> str:
+    path = _inside(workspace, relative, must_exist=True)
+    if not path.is_file():
+        raise ManifestExecutionError(f"{role} must be a regular file: {relative}")
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _validate_ported_kernel(workspace: Path, kernel: PortedKernel) -> None:
+    """Require the CUDA kernel to exist and its port to define a GPU kernel, not PyTorch ops."""
+
+    source = _read_regular_file(workspace, kernel.cuda_source, "ported_kernels.cuda_source")
+    if not re.search(rf"\b{re.escape(kernel.cuda_kernel)}\b", source):
+        raise ManifestExecutionError(
+            f"{kernel.cuda_source} does not mention CUDA kernel {kernel.cuda_kernel}"
+        )
+    definition = _KERNEL_DEFINITION[kernel.implementation]
+    texts = [
+        _read_regular_file(workspace, relative, "ported_kernels.port_files item")
+        for relative in kernel.port_files
+    ]
+    if not any(definition.search(text) for text in texts):
+        raise ManifestExecutionError(
+            f"the port of {kernel.cuda_kernel} is declared as {kernel.implementation} but none "
+            f"of {', '.join(kernel.port_files)} defines a {kernel.implementation} kernel; "
+            "a PyTorch fallback is not a port"
+        )
+
+
+def _expand_variables(value: str, variables: dict[str, str]) -> str | None:
+    """Substitute already-assigned shell variables, or return None if one is unknown."""
+
+    expanded: list[str] = []
+    position = 0
+    for reference in _VARIABLE_REFERENCE.finditer(value):
+        name = reference.group(1) or reference.group(2)
+        if name not in variables:
+            return None
+        expanded.append(value[position : reference.start()])
+        expanded.append(variables[name])
+        position = reference.end()
+    expanded.append(value[position:])
+    return "".join(expanded)
+
+
+def _shell_path_variables(lines: list[str]) -> dict[str, str]:
+    """Resolve single-word shell assignments, including ones composed of earlier variables."""
+
+    variables: dict[str, str] = {}
+    for line in lines:
+        assignment = _ASSIGNMENT.fullmatch(line.removeprefix("export "))
+        if assignment is None:
+            continue
+        raw_value = assignment.group(2)
+        if "'" in raw_value:
+            # Single quotes suppress expansion; do not guess the runtime value.
+            continue
+        try:
+            tokens = shlex.split(raw_value)
+        except ValueError:
+            continue
+        if len(tokens) != 1:
+            continue
+        expanded = _expand_variables(tokens[0], variables)
+        if expanded is not None:
+            variables[assignment.group(1)] = expanded
+    return variables
+
+
 def validate_manifest_files(run_dir: Path, manifest: ExecutionManifest) -> tuple[Path, Path]:
     """Validate all host-side files before starting Docker."""
 
     if manifest.status != "ready":
         raise ManifestExecutionError(manifest.blocked_reason or "manifest is blocked")
+    if isinstance(manifest, RocmPortingManifest):
+        validate_porting_files(run_dir, manifest)
 
     assert manifest.launch_script is not None
     assert manifest.host_repository is not None
@@ -130,18 +239,7 @@ def validate_manifest_files(run_dir: Path, manifest: ExecutionManifest) -> tuple
         detail = syntax_check.stderr.strip() or "unknown bash syntax error"
         raise ManifestExecutionError(f"launch script contains invalid shell syntax: {detail}")
 
-    repository_variables: set[str] = set()
-    assignment_pattern = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
-    for line in lines:
-        assignment = assignment_pattern.fullmatch(line)
-        if assignment:
-            try:
-                value_tokens = shlex.split(assignment.group(2))
-            except ValueError:
-                continue
-            if value_tokens == [manifest.container_repository]:
-                repository_variables.add(assignment.group(1))
-
+    variables = _shell_path_variables(lines)
     valid_cd = False
     for line in lines:
         if not line.startswith("cd "):
@@ -149,14 +247,7 @@ def validate_manifest_files(run_dir: Path, manifest: ExecutionManifest) -> tuple
         tokens = shlex.split(line)
         if len(tokens) != 2:
             continue
-        target = tokens[1]
-        if target == manifest.container_repository:
-            valid_cd = True
-            break
-        variable = target.removeprefix("${").removesuffix("}")
-        if variable == target:
-            variable = target.removeprefix("$")
-        if variable in repository_variables:
+        if _expand_variables(tokens[1], variables) == manifest.container_repository:
             valid_cd = True
             break
     if not valid_cd:

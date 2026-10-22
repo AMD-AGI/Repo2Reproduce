@@ -20,6 +20,8 @@ SAFE_HOST_COMMAND = re.compile(
     r"stat(?:\s+[-a-zA-Z0-9_./]+)+|"
     r"rocm-smi(?:\s+[-a-zA-Z0-9_=.,/]+)*)$"
 )
+# Installed only for --rocm-porting runs. One command, no shell syntax.
+PORTING_COMMAND = re.compile(r"^(?:port-scan|port-hipify)(?:\s+[A-Za-z0-9_./:@+-]+)*$")
 
 
 def decision(value: str, reason: str) -> dict:
@@ -45,6 +47,12 @@ def main() -> int:
         )
     elif SAFE_HOST_COMMAND.fullmatch(command):
         result = decision("allow", "Read-only host inspection allowed.")
+    elif PORTING_COMMAND.fullmatch(command):
+        result = decision(
+            "allow",
+            "CUDA-to-ROCm porting command allowed. port-scan only reads; port-hipify writes a "
+            "HIPIFY-translated copy inside the workspace and never edits the clone.",
+        )
     else:
         result = decision(
             "deny",

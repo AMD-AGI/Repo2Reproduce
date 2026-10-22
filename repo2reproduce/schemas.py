@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import PurePosixPath
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -686,3 +686,213 @@ class FinalReport(BaseModel):
         if len(ids) != len(set(ids)):
             raise ValueError("assumption ids must be unique")
         return self
+
+
+_CUDA_BLOCKER = re.compile(r"\b(?:cuda|nvcc|nvidia|ptx|cutlass|cudnn|wgmma)", re.IGNORECASE)
+_MIN_EVIDENCE_CHARS = 20
+
+PortingStrategy = Literal[
+    "existing_rocm_port",
+    "portable_repo_path",
+    "hipify_with_fixes",
+    "targeted_rewrite",
+]
+PORTING_LADDER: tuple[str, ...] = get_args(PortingStrategy)
+KERNEL_PORT_STRATEGIES = frozenset({"hipify_with_fixes", "targeted_rewrite"})
+
+# GPU kernel languages a ported CUDA kernel may run as. PyTorch tensor operations are a
+# fallback, not a port, so they are deliberately absent.
+KernelImplementation = Literal["hip", "triton", "composable_kernel", "rocwmma"]
+
+
+class PortingAttempt(BaseModel):
+    """One strategy from the CUDA-to-ROCm porting ladder and what it produced."""
+
+    strategy: PortingStrategy
+    outcome: Literal["succeeded", "failed", "not_applicable"]
+    evidence: str
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> PortingAttempt:
+        if len(self.evidence.strip()) < _MIN_EVIDENCE_CHARS:
+            raise ValueError(
+                f"porting attempt {self.strategy} needs concrete evidence "
+                "(URLs, file paths, commands, or errors)"
+            )
+        return self
+
+
+class ParityCheck(BaseModel):
+    """Comparison of the ROCm code path against a trusted reference implementation."""
+
+    reference: str
+    inputs: str
+    error_metric: str
+    observed_error: float = Field(ge=0, allow_inf_nan=False)
+    tolerance: float = Field(gt=0, allow_inf_nan=False)
+    log_path: str
+
+    @model_validator(mode="after")
+    def validate_result(self) -> ParityCheck:
+        self.log_path = _relative_path(self.log_path, "parity_check.log_path")
+        for name in ("reference", "inputs", "error_metric"):
+            if not getattr(self, name).strip():
+                raise ValueError(f"parity_check.{name} cannot be empty")
+        if self.observed_error > self.tolerance:
+            raise ValueError(
+                f"parity check failed: observed_error {self.observed_error} exceeds "
+                f"tolerance {self.tolerance}"
+            )
+        return self
+
+
+class PortedKernel(BaseModel):
+    """One CUDA kernel from the selected code path and the GPU kernel that replaces it on ROCm."""
+
+    cuda_kernel: str
+    cuda_source: str
+    implementation: KernelImplementation
+    port_files: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_paths(self) -> PortedKernel:
+        if not self.cuda_kernel.strip():
+            raise ValueError("ported_kernels item needs a cuda_kernel name")
+        self.cuda_source = _relative_path(self.cuda_source, "ported_kernels.cuda_source")
+        self.port_files = [
+            _relative_path(path, "ported_kernels.port_files item") for path in self.port_files
+        ]
+        return self
+
+
+class RocmPortReport(BaseModel):
+    """How the selected experiment's CUDA-specific code was handled on ROCm."""
+
+    uses_cuda_specific_code: bool
+    summary: str
+    attempts: list[PortingAttempt] = Field(default_factory=list)
+    patches: list[str] = Field(default_factory=list)
+    ported_kernels: list[PortedKernel] = Field(default_factory=list)
+    parity_check: ParityCheck | None = None
+
+    @model_validator(mode="after")
+    def validate_report(self) -> RocmPortReport:
+        if not self.summary.strip():
+            raise ValueError("rocm_port.summary cannot be empty")
+        strategies = [attempt.strategy for attempt in self.attempts]
+        if len(strategies) != len(set(strategies)):
+            raise ValueError("rocm_port.attempts must list each strategy at most once")
+        self.patches = [_relative_path(patch, "rocm_port.patches item") for patch in self.patches]
+        kernels = [(kernel.cuda_source, kernel.cuda_kernel) for kernel in self.ported_kernels]
+        if len(kernels) != len(set(kernels)):
+            raise ValueError("rocm_port.ported_kernels must list each CUDA kernel at most once")
+        ported = (
+            bool(self.patches)
+            or bool(self.ported_kernels)
+            or any(attempt.outcome == "succeeded" for attempt in self.attempts)
+        )
+        if ported and not self.uses_cuda_specific_code:
+            raise ValueError(
+                "rocm_port records ported code, so uses_cuda_specific_code must be true"
+            )
+        return self
+
+
+class RocmPortingManifest(ExecutionManifest):
+    """Execution manifest for --rocm-porting runs, with the porting evidence attached."""
+
+    rocm_port: RocmPortReport
+
+    @model_validator(mode="after")
+    def validate_porting(self) -> RocmPortingManifest:
+        port = self.rocm_port
+        if self.status == "blocked":
+            cuda_blocker = port.uses_cuda_specific_code or bool(
+                _CUDA_BLOCKER.search(self.blocked_reason or "")
+            )
+            recorded = {attempt.strategy for attempt in port.attempts}
+            missing = [strategy for strategy in PORTING_LADDER if strategy not in recorded]
+            if cuda_blocker and missing:
+                raise ValueError(
+                    "a CUDA-related blocked manifest must record every porting strategy; "
+                    f"missing: {', '.join(missing)}"
+                )
+            return self
+
+        if port.uses_cuda_specific_code:
+            succeeded = {
+                attempt.strategy for attempt in port.attempts if attempt.outcome == "succeeded"
+            }
+            if not succeeded:
+                raise ValueError(
+                    "ready manifest with CUDA-specific code must record the porting "
+                    "strategy that succeeded"
+                )
+            if port.parity_check is None:
+                raise ValueError(
+                    "ready manifest with CUDA-specific code requires rocm_port.parity_check"
+                )
+            if succeeded & KERNEL_PORT_STRATEGIES and not port.ported_kernels:
+                raise ValueError(
+                    "a hipify_with_fixes or targeted_rewrite port must list every CUDA kernel "
+                    "the selected path launches in rocm_port.ported_kernels, each as a HIP, "
+                    "Triton, Composable Kernel, or rocWMMA kernel; a PyTorch fallback is not a port"
+                )
+        return self
+
+
+class ForcedKernelPortingManifest(RocmPortingManifest):
+    """Manifest that requires the selected CUDA kernel itself to execute on ROCm."""
+
+    @model_validator(mode="after")
+    def validate_forced_kernel_port(self) -> ForcedKernelPortingManifest:
+        port = self.rocm_port
+        if not port.uses_cuda_specific_code:
+            raise ValueError("forced kernel port requires uses_cuda_specific_code=true")
+        if self.status == "blocked":
+            attempts = {attempt.strategy: attempt for attempt in port.attempts}
+            for strategy in sorted(KERNEL_PORT_STRATEGIES):
+                attempt = attempts.get(strategy)
+                if attempt is None or attempt.outcome == "not_applicable":
+                    raise ValueError(
+                        "forced kernel port must actually attempt hipify_with_fixes and "
+                        "targeted_rewrite before blocking"
+                    )
+            return self
+        succeeded = {
+            attempt.strategy for attempt in port.attempts if attempt.outcome == "succeeded"
+        }
+        if not succeeded & KERNEL_PORT_STRATEGIES:
+            raise ValueError(
+                "forced kernel port requires hipify_with_fixes or targeted_rewrite to succeed; "
+                "an existing ROCm or portable implementation does not count"
+            )
+        if not port.patches:
+            raise ValueError(
+                "forced kernel port requires at least one persisted patch or edit script"
+            )
+        return self
+
+
+class PortingPreparationStageOutput(PreparationStageOutput):
+    """Environment preparation output whose manifest carries ``rocm_port``."""
+
+    manifest: RocmPortingManifest
+
+
+class ForcedPortingPreparationStageOutput(PreparationStageOutput):
+    """Environment preparation output for ``--force-kernel-port``."""
+
+    manifest: ForcedKernelPortingManifest
+
+
+def preparation_stage_model(
+    rocm_porting: bool, force_kernel_port: bool = False
+) -> type[PreparationStageOutput]:
+    """Select the structured-output model for environment preparation."""
+
+    if force_kernel_port:
+        return ForcedPortingPreparationStageOutput
+    if rocm_porting:
+        return PortingPreparationStageOutput
+    return PreparationStageOutput
