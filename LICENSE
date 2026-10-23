@@ -193,5 +193,4 @@
 
 This license covers the code authored by Advanced Micro Devices, Inc. in this
 repository. Vendored and derived third-party code keeps its original license;
-see THIRD_PARTY_NOTICES.md. Model checkpoints are distributed separately under
-the licenses stated in model_cards/.
+see THIRD_PARTY_NOTICES.md.
