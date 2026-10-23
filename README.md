@@ -2,21 +2,49 @@
 
 Repo2Reproduce is a multistep agent based on Claude-code SDK that reproduces a paper's result from its official repository: it selects a target, reconciles paper and code settings, builds a Docker environment, runs the experiment deterministically, and compares the metric with the paper. It runs on AMD Instinct GPUs and ROCm.
 
-## How it works
+![Repo2Reproduce agentic architecture](assets/repo2reproduce_agentic_architecture.png)
 
-Each run goes through these stages, and each stage's output is saved in the run directory:
+## Architecture
 
-1. **Bootstrap.** Download and parse the paper, and clone the official repository.
-2. **Target selection.** Freeze the result to reproduce: the one you name, or a central,
-   locally reproducible result the agent picks.
-3. **Configuration audit.** Reconcile every setting the paper states (dataset, model,
-   seeds, metric) with what the code actually runs.
-4. **Environment preparation.** Build a Docker image, run a short smoke test, and freeze an
-   execution manifest.
-5. **Execution.** Run the manifest deterministically. A failed run gets up to two automatic
-   repairs.
-6. **Report.** Compare the measured value with the paper and give a verdict: `match`,
-   `miss`, `run_incomplete`, or `needs_review`.
+A run takes two inputs, a paper URL and its official repository URL. The paper is parsed
+with OpenDataLoader PDF, and the repository is cloned and pinned to a commit.
+
+### Orchestrator
+
+The **Repo2Reproduce Orchestrator** is ordinary Python code, not an agent. 
+
+### Stages
+
+1. **Target Selection Agent.** Reads the parsed paper and an optional `--target`. Picks
+   one result grounded in the paper's contribution and freezes its metric, value,
+   aggregation, and protocol. Writes `target.json`.
+2. **Configuration Reconciliation Agent.** Uses the *bidirectional scientific-configuration
+   reconciliation* skill. Traces the repository's execution path, maps code to paper and
+   paper to code, resolves conflicts, and flags anything the code does not implement. The
+   result is one canonical scientific configuration in `configuration_audit.json`.
+3. **ROCm Kernel-Porting Agent** (only with `--porting rocm` or `force`; it runs as part of
+   environment preparation). Scans the CUDA
+   sources, translates them with the official HIPIFY plus the *ROCm kernel porting* skill,
+   compiles them, and checks numerical parity with a reference. Writes the ported kernels
+   and a porting record. See [PORTING.md](PORTING.md).
+4. **Environment Preparation Agent.** Builds a ROCm Docker image with the dependencies,
+   applies every chosen scientific setting, writes a synchronous launch script, and runs
+   a short smoke test. Writes `environment_manifest.json` and `execution_manifest.json`.
+5. **Execution.**
+   - **5a. Deterministic Executor.** Plain Python, no agent. Checks the manifest, hashes,
+     and launch script, runs the experiment in an isolated GPU container, checks the
+     declared outputs, and extracts the metric. Writes `execution_result.json` and logs.
+   - **5b. Execution Repair Agent.** Runs only if execution failed. Uses the *execution
+     failure diagnosis and repair* skill to apply the smallest operational fix, smoke-test
+     it, and record the patch. Target, metric, and scientific values are frozen and checked
+     before every retry. The loop runs at most two repairs and stops on success, a
+     repeated failure, an invalid or no-op repair, or an exhausted budget.
+6. **Finalization Agent.** Uses the *evidence-grounded result comparison* skill. Checks
+   the metric, protocol, and aggregation, compares the paper value, the reproduced value,
+   and the paper's baseline, and records assumptions, deviations, and gaps. Writes
+   `final_report.md` with a verdict of `match`, `miss`, `run_incomplete`, or
+   `needs_review`, and links to the evidence.
+
 
 ## Requirements
 
@@ -48,20 +76,6 @@ setting with comments; copy it and fill in your values:
 ```bash
 cp .env.example .env
 ```
-
-| Setting | Description |
-| --- | --- |
-| `R2R_AUTH_MODE` | `api_key` for the Anthropic API, or `custom_headers` for a gateway. `R2R_PROVIDER` is a label. |
-| `ANTHROPIC_API_KEY` | Your key, with `api_key` mode. |
-| `R2R_BASE_URL`, `R2R_AUTH_HEADERS`, `R2R_AUTH_KEY` | Gateway URL, header template, and key, with `custom_headers` mode. |
-| `R2R_MODEL_REASONING` | Model ID for every agent stage. |
-| `R2R_JAVA_HOME` | Java 11+ installation, used to parse papers. |
-| `R2R_RUNS_ROOT` | Where runs are written. Put it outside the checkout on a large disk. |
-| `R2R_MAX_BUDGET_USD` | Spending cap in US dollars for a whole run, across all stages (default `100`). |
-| `R2R_MAX_TURNS` | Turn limit per agent session (default `200`). |
-
-Papers with gated Hugging Face models, such as LLaMA2-7B for NSNQuant, also need
-`export HF_TOKEN=<token>` before launch.
 
 ## Run one paper
 
