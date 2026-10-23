@@ -6,7 +6,7 @@ runs through a bash script in `scripts/`; the papers live in `dataset/papers.tsv
 | Script | Purpose |
 | --- | --- |
 | `scripts/setup.sh` | Check the host, create `.venv`, install, create `.env`, verify. |
-| `scripts/list_papers.sh` | List the dataset with ids, names, porting mode, and default target. |
+| `scripts/list_papers.sh` | List the dataset with ids, names, and paper links. |
 | `scripts/run_one.sh` | Reproduce one paper (by dataset id/name, or by URLs), or recover a run. |
 | `scripts/run_all.sh` | Reproduce all 22 papers sequentially (or a subset). |
 | `scripts/summarize.sh` | Table of status, verdict, paper value, and reproduced value per run. |
@@ -115,11 +115,10 @@ scripts/run_one.sh --recover "$R2R_RUNS_ROOT/<run-id>" --gpu 0
 | --- | --- |
 | `--gpu N` | Physical AMD GPU index (default `0`). |
 | `--paper URL`, `--repo URL` | Run a paper that is not in the dataset. |
-| `--target TEXT` | Result to reproduce; overrides the dataset target. Name a table, row, or figure, not hyperparameters. |
-| `--no-target` | Ignore the dataset target; the agent picks a central result. |
-| `--porting MODE` | `none`, `rocm` (`--rocm-porting`), or `force` (`--rocm-porting --force-kernel-port`). See [PORTING.md](PORTING.md). |
+| `--target TEXT` | Result to reproduce: a table, row, or figure, not hyperparameters. Without it, the agent picks a central result. |
+| `--porting MODE` | `none` (default), `rocm` (`--rocm-porting`), or `force` (`--rocm-porting --force-kernel-port`). See [PORTING.md](PORTING.md). |
 | `--max-budget-usd USD` | Spending cap per agent session (default `R2R_MAX_BUDGET_USD`, else `100`). |
-| `--timeout SECONDS` | Limit for the final execution only (default from the dataset, else `14400`). |
+| `--timeout SECONDS` | Limit for the final execution only (default `14400`). |
 | `--runs-root DIR` | Where runs go (default `R2R_RUNS_ROOT`, else `~/r2r-runs`). |
 | `--run-id ID` | Run directory name (default `<id>-<name>-<UTC timestamp>`). |
 | `--prepare-only` | Build the environment and freeze the manifest, but do not execute. |
@@ -144,7 +143,6 @@ A failed or blocked paper does not stop the batch.
 | `--gpu N` | GPU for every run (default `0`). |
 | `--only LIST` | Comma-separated ids or names to run, in dataset order. |
 | `--skip LIST` | Comma-separated ids or names to leave out. |
-| `--no-targets` | Ignore every dataset target. |
 | `--max-budget-usd USD` | Spending cap per agent session, for every run. |
 | `--prepare-only` | Freeze each run without executing it. |
 | `--stop-on-error` | Stop at the first run that does not exit `0`. |

@@ -1,26 +1,24 @@
 # Repo2Reproduce benchmark: one paper per line, tab-separated. Read by scripts/*.sh.
-# porting: none | rocm (--rocm-porting) | force (--rocm-porting --force-kernel-port)
-# target: default --target for this paper; "-" lets the agent choose a central result.
-id	name	paper_url	repo_url	porting	timeout_seconds	target
-1	bookcoref	https://arxiv.org/abs/2507.12075	https://github.com/sapienzanlp/bookcoref	none	14400	-
-2	verbalized	https://arxiv.org/abs/2505.11683	https://github.com/flairNLP/VerbalizED	none	14400	-
-3	qpcert	https://arxiv.org/abs/2412.00537	https://github.com/saper0/qpcert	none	14400	-
-4	comres	https://openreview.net/pdf?id=bRa4JLPzii	https://github.com/yjucho1/CoMRes	none	14400	-
-5	cogs	https://arxiv.org/abs/2410.01779	https://github.com/facebookresearch/luckmatters/tree/yuandong3/ssl/real-dataset	none	14400	Reproduce Table 2, the d=23 modular-addition row.
-6	mm-argfallacy	https://arxiv.org/abs/2507.15641	https://github.com/alessiopittiglio/mm-argfallacy	none	14400	-
-7	catch	https://arxiv.org/abs/2410.12261	https://github.com/decisionintelligence/CATCH	none	14400	-
-8	kff	https://arxiv.org/abs/2510.12150	https://github.com/zhoujiahuan1991/NeurIPS2025-KFF	none	14400	-
-9	convolutional-diffusion	https://arxiv.org/abs/2412.20292	https://github.com/Kambm/convolutional_diffusion	none	14400	-
-10	refersplat	https://arxiv.org/abs/2508.08252	https://github.com/heshuting555/ReferSplat	none	14400	-
-11	robustness-reprogramming	https://arxiv.org/abs/2410.04577	https://github.com/chris-hzc/Robustness-Reprogramming	none	14400	-
-12	timeemb	https://arxiv.org/abs/2510.00461	https://github.com/showmeon/TimeEmb	none	14400	-
-13	mcnc	https://arxiv.org/abs/2406.19301	https://github.com/mint-vu/MCNC	none	14400	-
-14	hymn	https://arxiv.org/abs/2501.03113	https://github.com/jks17/hymn	none	14400	-
-15	benign-attention	https://arxiv.org/abs/2409.17625	https://github.com/keitaroskmt/benign-attention	none	14400	-
-16	grokformer	https://arxiv.org/abs/2411.17296	https://github.com/gga23/grokformer	none	14400	-
-17	timemcl	https://arxiv.org/abs/2506.05515	https://github.com/victorletzelter/timemcl	none	14400	-
-18	flatquant	https://arxiv.org/abs/2410.09426	https://github.com/ruikangliu/FlatQuant	none	14400	-
-19	layerdag	https://arxiv.org/abs/2411.02322	https://github.com/Graph-COM/LayerDAG	none	14400	-
-20	askqe	https://arxiv.org/abs/2504.11582	https://github.com/dayeonki/askqe	none	14400	-
-21	nsnquant	https://arxiv.org/abs/2505.18231	https://github.com/DHdroid/NSNQuant	force	14400	Reproduce the Section 4.5 / Figure 4 memory-and-throughput comparison of FP16 against NSNQuant-2b and NSNQuant-1b on LLaMA2-7B with the official run_spd_mem_benchmark.py, running the official nsn_tools CUDA kernels ported to ROCm.
-22	sageattention	https://arxiv.org/abs/2410.02367	https://github.com/thu-ml/SageAttention	force	14400	Reproduce the attention accuracy (cosine similarity and relative L1 against full-precision attention) of the official SageAttention INT8 CUDA kernel, ported to ROCm.
+id	name	paper_url	repo_url	conference
+1	bookcoref	https://arxiv.org/abs/2507.12075	https://github.com/sapienzanlp/bookcoref	ACL 2025
+2	verbalized	https://arxiv.org/abs/2505.11683	https://github.com/flairNLP/VerbalizED	ACL 2025
+3	qpcert	https://arxiv.org/abs/2412.00537	https://github.com/saper0/qpcert	ICLR 2025
+4	comres	https://openreview.net/pdf?id=bRa4JLPzii	https://github.com/yjucho1/CoMRes	ICLR 2025
+5	cogs	https://arxiv.org/abs/2410.01779	https://github.com/facebookresearch/luckmatters/tree/yuandong3/ssl/real-dataset	NeurIPS 2025
+6	mm-argfallacy	https://arxiv.org/abs/2507.15641	https://github.com/alessiopittiglio/mm-argfallacy	ACL 2025 (ArgMining Workshop)
+7	catch	https://arxiv.org/abs/2410.12261	https://github.com/decisionintelligence/CATCH	ICLR 2025
+8	kff	https://arxiv.org/abs/2510.12150	https://github.com/zhoujiahuan1991/NeurIPS2025-KFF	NeurIPS 2025
+9	convolutional-diffusion	https://arxiv.org/abs/2412.20292	https://github.com/Kambm/convolutional_diffusion	ICML 2025
+10	refersplat	https://arxiv.org/abs/2508.08252	https://github.com/heshuting555/ReferSplat	ICML 2025
+11	robustness-reprogramming	https://arxiv.org/abs/2410.04577	https://github.com/chris-hzc/Robustness-Reprogramming	ICLR 2025
+12	timeemb	https://arxiv.org/abs/2510.00461	https://github.com/showmeon/TimeEmb	NeurIPS 2025
+13	mcnc	https://arxiv.org/abs/2406.19301	https://github.com/mint-vu/MCNC	ICLR 2025
+14	hymn	https://arxiv.org/abs/2501.03113	https://github.com/jks17/hymn	ICML 2025
+15	benign-attention	https://arxiv.org/abs/2409.17625	https://github.com/keitaroskmt/benign-attention	ICML 2025
+16	grokformer	https://arxiv.org/abs/2411.17296	https://github.com/gga23/grokformer	ICML 2025
+17	timemcl	https://arxiv.org/abs/2506.05515	https://github.com/victorletzelter/timemcl	ICML 2025
+18	flatquant	https://arxiv.org/abs/2410.09426	https://github.com/ruikangliu/FlatQuant	ICML 2025
+19	layerdag	https://arxiv.org/abs/2411.02322	https://github.com/Graph-COM/LayerDAG	ICLR 2025
+20	askqe	https://arxiv.org/abs/2504.11582	https://github.com/dayeonki/askqe	ACL 2025 (Findings)
+21	nsnquant	https://arxiv.org/abs/2505.18231	https://github.com/DHdroid/NSNQuant	NeurIPS 2025
+22	sageattention	https://arxiv.org/abs/2410.02367	https://github.com/thu-ml/SageAttention	ICLR 2025

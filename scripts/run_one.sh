@@ -6,13 +6,12 @@
 #   scripts/run_one.sh --recover <run-dir> [--gpu N] [--max-budget-usd USD] [--detach]
 #
 # Options:
-#   --target TEXT       result to reproduce (overrides the dataset's target column)
-#   --no-target         ignore the dataset target and let the agent choose
+#   --target TEXT       result to reproduce (default: the agent chooses)
 #   --gpu N             physical AMD GPU index (default: 0)
 #   --runs-root DIR     where run directories go (default: $R2R_RUNS_ROOT, .env, ~/r2r-runs)
 #   --run-id ID         run directory name (default: <id>-<name>-<UTC timestamp>)
-#   --timeout SECONDS   limit for the final execution (default: dataset column, else 14400)
-#   --porting MODE      none | rocm | force (default: dataset column, else none)
+#   --timeout SECONDS   limit for the final execution (default: 14400)
+#   --porting MODE      none | rocm | force (default: none)
 #   --max-budget-usd USD  spending cap per agent session (default: R2R_MAX_BUDGET_USD in .env, else 100)
 #   --prepare-only      stop after the execution manifest is frozen; do not execute
 #   --detach            run in the background; console output goes to <runs-root>/<run-id>.log
@@ -29,7 +28,7 @@ usage() {
     exit "${1:-0}"
 }
 
-selector="" paper="" repo="" target="" target_set=0 no_target=0 gpu=0
+selector="" paper="" repo="" target="" gpu=0
 runs_root="" run_id="" timeout="" porting="" budget="" prepare_only=0 detach=0 dry_run=0 recover=""
 extra=()
 
@@ -38,8 +37,7 @@ while (($#)); do
         -h|--help) usage 0 ;;
         --paper) paper="${2:?}"; shift 2 ;;
         --repo) repo="${2:?}"; shift 2 ;;
-        --target) target="${2?}"; target_set=1; shift 2 ;;
-        --no-target) no_target=1; shift ;;
+        --target) target="${2?}"; shift 2 ;;
         --gpu) gpu="${2:?}"; shift 2 ;;
         --runs-root) runs_root="${2:?}"; shift 2 ;;
         --run-id) run_id="${2:?}"; shift 2 ;;
@@ -68,23 +66,18 @@ if [[ -n "$recover" ]]; then
     [[ -n "$budget" ]] && cmd+=(--max-budget-usd "$budget")
     cmd+=("${extra[@]}")
 else
-    name="custom" dataset_target="-" dataset_timeout="" dataset_porting="" id=""
+    name="custom" id=""
     if [[ -n "$selector" ]]; then
         row="$(dataset_lookup "$selector")"
         [[ -n "$row" ]] || die "no paper with id or name '$selector' in $DATASET (see scripts/list_papers.sh)"
-        IFS=$'\t' read -r id name ds_paper ds_repo dataset_porting dataset_timeout dataset_target <<<"$row"
+        IFS=$'\t' read -r id name ds_paper ds_repo _conference <<<"$row"
         [[ -n "$paper" ]] || paper="$ds_paper"
         [[ -n "$repo" ]] || repo="$ds_repo"
     fi
     [[ -n "$paper" && -n "$repo" ]] || { echo "give a dataset id/name, or --paper and --repo" >&2; usage 64; }
 
-    if ((no_target)); then
-        target=""
-    elif ((!target_set)) && [[ "$dataset_target" != "-" ]]; then
-        target="$dataset_target"
-    fi
-    [[ -n "$timeout" ]] || timeout="${dataset_timeout:-14400}"
-    [[ -n "$porting" ]] || porting="${dataset_porting:-none}"
+    [[ -n "$timeout" ]] || timeout=14400
+    [[ -n "$porting" ]] || porting=none
     [[ -n "$run_id" ]] || run_id="${id:+$id-}$name-$(date -u +%Y%m%d-%H%M%S)"
     log="$runs_root/$run_id.log"
 

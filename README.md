@@ -66,10 +66,10 @@ Papers with gated Hugging Face models, such as LLaMA2-7B for NSNQuant, also need
 ## Run one paper
 
 Select a paper from the [dataset](dataset/README.md) by id or name. The dataset supplies
-the paper, repository, porting mode, and default target.
+the paper and repository; without `--target`, the agent picks the result.
 
 ```bash
-scripts/list_papers.sh                                # ids, names, porting modes, targets
+scripts/list_papers.sh                                # ids, names, and paper links
 scripts/run_one.sh 9 --gpu 0                          # by id
 scripts/run_one.sh convolutional-diffusion --gpu 0    # the same paper, by name
 scripts/run_one.sh nsnquant --gpu 1 --detach          # in the background
@@ -84,8 +84,8 @@ scripts/run_one.sh --paper https://arxiv.org/abs/<id> --repo https://github.com/
 | Flag | Description |
 | --- | --- |
 | `--gpu N` | Physical AMD GPU index from `rocm-smi` (default `0`). |
-| `--target TEXT` | Result to reproduce; overrides the dataset target. |
-| `--porting MODE` | `none`, `rocm`, or `force`; overrides the dataset mode. |
+| `--target TEXT` | Result to reproduce (default: the agent chooses). |
+| `--porting MODE` | `none` (default), `rocm`, or `force`. |
 | `--max-budget-usd USD` | Spending cap per agent session; overrides `R2R_MAX_BUDGET_USD`. |
 | `--prepare-only` | Build and freeze the run without executing it. |
 | `--detach` | Run in the background; the log is `<runs-root>/<run-id>.log`. |
@@ -112,7 +112,6 @@ scripts/run_all.sh --gpu 1 --only 12,13,14,15,16,17,18,19,20,21,22 --detach
 | --- | --- |
 | `--gpu N` | GPU for every run (default `0`). |
 | `--only LIST`, `--skip LIST` | Comma-separated ids or names to run, or to leave out. |
-| `--no-targets` | Ignore the dataset targets; the agent picks every result. |
 | `--max-budget-usd USD` | Spending cap per agent session, for every run. |
 | `--stop-on-error` | Stop at the first paper that does not succeed. |
 | `--detach` | Run the batch in the background. |
@@ -124,7 +123,6 @@ hyperparameters, because the configuration audit finds them in the paper and cod
 
 ```bash
 scripts/run_one.sh cogs --gpu 0 --target "Reproduce Table 2, the d=71 modular-addition row."
-scripts/run_one.sh cogs --gpu 0 --no-target           # let the agent choose
 ```
 
 ## Port CUDA kernels to ROCm
