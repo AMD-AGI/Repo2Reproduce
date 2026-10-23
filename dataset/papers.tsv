@@ -1,0 +1,24 @@
+# Repo2Reproduce benchmark: one paper per line, tab-separated. Read by scripts/*.sh.
+id	name	paper_url	repo_url	conference
+1	bookcoref	https://arxiv.org/abs/2507.12075	https://github.com/sapienzanlp/bookcoref	ACL 2025
+2	verbalized	https://arxiv.org/abs/2505.11683	https://github.com/flairNLP/VerbalizED	ACL 2025
+3	qpcert	https://arxiv.org/abs/2412.00537	https://github.com/saper0/qpcert	ICLR 2025
+4	comres	https://openreview.net/pdf?id=bRa4JLPzii	https://github.com/yjucho1/CoMRes	ICLR 2025
+5	cogs	https://arxiv.org/abs/2410.01779	https://github.com/facebookresearch/luckmatters/tree/yuandong3/ssl/real-dataset	NeurIPS 2025
+6	mm-argfallacy	https://arxiv.org/abs/2507.15641	https://github.com/alessiopittiglio/mm-argfallacy	ACL 2025 (ArgMining Workshop)
+7	catch	https://arxiv.org/abs/2410.12261	https://github.com/decisionintelligence/CATCH	ICLR 2025
+8	kff	https://arxiv.org/abs/2510.12150	https://github.com/zhoujiahuan1991/NeurIPS2025-KFF	NeurIPS 2025
+9	convolutional-diffusion	https://arxiv.org/abs/2412.20292	https://github.com/Kambm/convolutional_diffusion	ICML 2025
+10	refersplat	https://arxiv.org/abs/2508.08252	https://github.com/heshuting555/ReferSplat	ICML 2025
+11	robustness-reprogramming	https://arxiv.org/abs/2410.04577	https://github.com/chris-hzc/Robustness-Reprogramming	ICLR 2025
+12	timeemb	https://arxiv.org/abs/2510.00461	https://github.com/showmeon/TimeEmb	NeurIPS 2025
+13	mcnc	https://arxiv.org/abs/2406.19301	https://github.com/mint-vu/MCNC	ICLR 2025
+14	hymn	https://arxiv.org/abs/2501.03113	https://github.com/jks17/hymn	ICML 2025
+15	benign-attention	https://arxiv.org/abs/2409.17625	https://github.com/keitaroskmt/benign-attention	ICML 2025
+16	grokformer	https://arxiv.org/abs/2411.17296	https://github.com/gga23/grokformer	ICML 2025
+17	timemcl	https://arxiv.org/abs/2506.05515	https://github.com/victorletzelter/timemcl	ICML 2025
+18	flatquant	https://arxiv.org/abs/2410.09426	https://github.com/ruikangliu/FlatQuant	ICML 2025
+19	layerdag	https://arxiv.org/abs/2411.02322	https://github.com/Graph-COM/LayerDAG	ICLR 2025
+20	askqe	https://arxiv.org/abs/2504.11582	https://github.com/dayeonki/askqe	ACL 2025 (Findings)
+21	nsnquant	https://arxiv.org/abs/2505.18231	https://github.com/DHdroid/NSNQuant	NeurIPS 2025
+22	sageattention	https://arxiv.org/abs/2410.02367	https://github.com/thu-ml/SageAttention	ICLR 2025

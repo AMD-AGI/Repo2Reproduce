@@ -1,0 +1,44 @@
+[project]
+name = "repo2reproduce"
+version = "0.2.0"
+description = "A Claude Code multistep agent for reproducing a targeted research-paper result."
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "Repo2Reproduce" }]
+
+dependencies = [
+    # Claude Agent SDK (isolated phase workers, structured output, custom MCP tools, hooks)
+    # 0.2.136+ includes the lifecycle/structured-result fixes required by phase workers;
+    # 0.2.166 is the verified floor for the per-stage `skills` option.
+    "claude-agent-sdk>=0.2.166",
+    # --- Strict paper-reading layer (OpenDataLoader PDF ONLY; Java-based, no torch) ---
+    "opendataloader-pdf>=2.4.0",
+    # Ingestion / utilities
+    "GitPython>=3.1",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.scripts]
+r2r = "repo2reproduce.runner:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatchling.build.targets.wheel]
+packages = ["repo2reproduce"]
+include = [
+    "repo2reproduce/prompts/*.md",
+    "repo2reproduce/skills/**/*.md",
+    "repo2reproduce/templates/*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
