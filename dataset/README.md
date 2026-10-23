@@ -63,7 +63,7 @@ The target, porting mode, and timeout are chosen per run with `--target`, `--por
 
 Before the first run, copy [`.env.example`](../.env.example) to `.env` and fill in your
 provider key, model, runs root, and budget; the [README](../README.md#configuration)
-explains each setting. Every flag is listed in [BENCHMARK.md](../BENCHMARK.md#2-run).
+explains each setting. Every flag is listed in [USER_GUIDE.md](../USER_GUIDE.md#2-run).
 
 **One paper**, by id or name:
 

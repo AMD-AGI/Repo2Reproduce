@@ -55,7 +55,7 @@ The **Repo2Reproduce Orchestrator** is ordinary Python code, not an agent.
 - Access to Claude, through the Anthropic API or an Anthropic-compatible gateway
 - Tens of GB of disk per paper, for repositories, caches, and outputs
 
-[BENCHMARK.md](BENCHMARK.md#1-set-up-the-environment) has the install commands.
+[USER_GUIDE.md](USER_GUIDE.md#1-set-up-the-environment) has the install commands.
 
 ## Installation
 
@@ -173,14 +173,12 @@ When recovering, the budget is the new total for the run, including what it alre
 
 ## Read the results
 
-```bash
-scripts/summarize.sh                                  # every run under the runs root
-scripts/summarize.sh --tsv > results.tsv              # for a spreadsheet
-```
+The main result of a run is **`final_report.md`** in its run directory. The Finalization
+Agent writes it with the **`paper-result-comparison` skill**
+([`repo2reproduce/skills/paper-result-comparison/`](repo2reproduce/skills/paper-result-comparison/SKILL.md)),
+which compares the reproduced value with the paper only from saved evidence.
 
-Each run directory has `final_report.md` with the selected result, the paper and
-reproduced values, the verdict, and every assumption and deviation. See
-[BENCHMARK.md](BENCHMARK.md#4-interpret-the-results) for what each status and verdict means.
-
-
-
+To compare many runs at once, `scripts/summarize.sh` prints one line per run with its
+status, verdict, paper value, and reproduced value (`--tsv` for a spreadsheet). See
+[USER_GUIDE.md](USER_GUIDE.md#4-interpret-the-results) for what each status and verdict
+means.

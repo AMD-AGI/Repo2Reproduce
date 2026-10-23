@@ -1,4 +1,4 @@
-# Running the 22-paper benchmark
+# User guide
 
 This guide covers everything from a bare AMD ROCm host to reading the results. Every step
 runs through a bash script in `scripts/`; the papers live in `dataset/papers.tsv`.
