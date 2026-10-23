@@ -2,6 +2,8 @@
 
 Repo2Reproduce is a multistep agent based on Claude-code SDK that reproduces a paper's result from its official repository: it selects a target, reconciles paper and code settings, builds a Docker environment, runs the experiment deterministically, and compares the metric with the paper. It runs on AMD Instinct GPUs and ROCm.
 
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 ![Repo2Reproduce agentic architecture](assets/repo2reproduce_agentic_architecture.png)
 
 ## Architecture
@@ -182,3 +184,25 @@ To compare many runs at once, `scripts/summarize.sh` prints one line per run wit
 status, verdict, paper value, and reproduced value (`--tsv` for a spreadsheet). See
 [USER_GUIDE.md](USER_GUIDE.md#4-interpret-the-results) for what each status and verdict
 means.
+
+## Third-party content and service terms
+
+Repo2Reproduce can send prompts, paper excerpts, source-code excerpts, and tool output to
+the configured language-model provider. Do not use confidential, restricted, or
+third-party material unless you are authorized to submit it to that provider.
+
+The research repositories, papers, datasets, checkpoints, container images, and other
+assets processed by a run keep their original licenses and terms. Generated ports and
+run artifacts do not relicense their source material. Review those terms before using or
+redistributing generated Docker images, ported repositories, or other artifacts.
+
+## License
+
+- Code authored by Advanced Micro Devices, Inc. is licensed under
+  [Apache-2.0](LICENSE).
+- Included or adapted third-party code retains its original license.
+- Claude Agent SDK, Claude Code CLI, Anthropic services, HIPIFY, downloaded research
+  repositories, papers, datasets, and checkpoints are governed by their respective
+  licenses and terms.
+- See [NOTICE](NOTICE) and
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.
