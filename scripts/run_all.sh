@@ -9,6 +9,7 @@
 #   --only LIST        comma-separated ids or names to run, in dataset order (e.g. 5,9,nsnquant)
 #   --skip LIST        comma-separated ids or names to leave out
 #   --no-targets       ignore the dataset target column; the agent chooses every result
+#   --max-budget-usd USD  spending cap per agent session, for every run (default: R2R_MAX_BUDGET_USD, else 100)
 #   --prepare-only     stop each run after its execution manifest is frozen
 #   --stop-on-error    stop the batch at the first run that does not exit 0
 #   --dry-run          print each r2r command without running it
@@ -22,7 +23,7 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-gpu=0 runs_root="" only="" skip="" no_targets=0 prepare_only=0 stop_on_error=0 dry_run=0 detach=0
+gpu=0 runs_root="" only="" skip="" budget="" no_targets=0 prepare_only=0 stop_on_error=0 dry_run=0 detach=0
 extra=()
 orig_args=("$@")
 while (($#)); do
@@ -33,6 +34,7 @@ while (($#)); do
         --only) only="${2:?}"; shift 2 ;;
         --skip) skip="${2:?}"; shift 2 ;;
         --no-targets) no_targets=1; shift ;;
+        --max-budget-usd) budget="${2:?}"; shift 2 ;;
         --prepare-only) prepare_only=1; shift ;;
         --stop-on-error) stop_on_error=1; shift ;;
         --dry-run) dry_run=1; shift ;;
@@ -100,6 +102,7 @@ for row in "${selected[@]}"; do
     run_id="$id-$name-$(date -u +%Y%m%d-%H%M%S)"
     opts=(--gpu "$gpu" --runs-root "$runs_root" --run-id "$run_id")
     ((no_targets)) && opts+=(--no-target)
+    [[ -n "$budget" ]] && opts+=(--max-budget-usd "$budget")
     ((prepare_only)) && opts+=(--prepare-only)
     ((dry_run)) && opts+=(--dry-run)
 

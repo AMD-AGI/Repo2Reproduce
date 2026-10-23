@@ -3,7 +3,7 @@
 #
 #   scripts/run_one.sh <id|name> [options] [-- extra r2r options]
 #   scripts/run_one.sh --paper <url> --repo <url> [options] [-- extra r2r options]
-#   scripts/run_one.sh --recover <run-dir> [--gpu N] [--detach]
+#   scripts/run_one.sh --recover <run-dir> [--gpu N] [--max-budget-usd USD] [--detach]
 #
 # Options:
 #   --target TEXT       result to reproduce (overrides the dataset's target column)
@@ -13,6 +13,7 @@
 #   --run-id ID         run directory name (default: <id>-<name>-<UTC timestamp>)
 #   --timeout SECONDS   limit for the final execution (default: dataset column, else 14400)
 #   --porting MODE      none | rocm | force (default: dataset column, else none)
+#   --max-budget-usd USD  spending cap per agent session (default: R2R_MAX_BUDGET_USD in .env, else 100)
 #   --prepare-only      stop after the execution manifest is frozen; do not execute
 #   --detach            run in the background; console output goes to <runs-root>/<run-id>.log
 #   --dry-run           print the r2r command without running it
@@ -29,7 +30,7 @@ usage() {
 }
 
 selector="" paper="" repo="" target="" target_set=0 no_target=0 gpu=0
-runs_root="" run_id="" timeout="" porting="" prepare_only=0 detach=0 dry_run=0 recover=""
+runs_root="" run_id="" timeout="" porting="" budget="" prepare_only=0 detach=0 dry_run=0 recover=""
 extra=()
 
 while (($#)); do
@@ -44,6 +45,7 @@ while (($#)); do
         --run-id) run_id="${2:?}"; shift 2 ;;
         --timeout) timeout="${2:?}"; shift 2 ;;
         --porting) porting="${2:?}"; shift 2 ;;
+        --max-budget-usd) budget="${2:?}"; shift 2 ;;
         --prepare-only) prepare_only=1; shift ;;
         --detach) detach=1; shift ;;
         --dry-run) dry_run=1; shift ;;
@@ -62,7 +64,9 @@ if [[ -n "$recover" ]]; then
     recover="$(cd "$recover" && pwd)"
     run_id="$(basename "$recover")"
     log="$(dirname "$recover")/$run_id.recover-$(date -u +%Y%m%d-%H%M%S).log"
-    cmd=("$R2R_BIN" --recover-run "$recover" --gpu "$gpu" "${extra[@]}")
+    cmd=("$R2R_BIN" --recover-run "$recover" --gpu "$gpu")
+    [[ -n "$budget" ]] && cmd+=(--max-budget-usd "$budget")
+    cmd+=("${extra[@]}")
 else
     name="custom" dataset_target="-" dataset_timeout="" dataset_porting="" id=""
     if [[ -n "$selector" ]]; then
@@ -93,6 +97,7 @@ else
         force) cmd+=(--rocm-porting --force-kernel-port) ;;
         *) die "--porting must be none, rocm, or force (got '$porting')" ;;
     esac
+    [[ -n "$budget" ]] && cmd+=(--max-budget-usd "$budget")
     ((prepare_only)) && cmd+=(--prepare-only)
     cmd+=("${extra[@]}")
 fi

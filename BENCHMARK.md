@@ -11,9 +11,8 @@ runs through a bash script in `scripts/`; the papers live in `dataset/papers.tsv
 | `scripts/run_all.sh` | Reproduce all 22 papers sequentially (or a subset). |
 | `scripts/summarize.sh` | Table of status, verdict, paper value, and reproduced value per run. |
 
-Every script prints its usage with `--help`. The [README](README.md) shows how to run one
-paper, all papers, a target, and a porting mode, with every flag. The
-[dataset README](dataset/README.md) lists the papers and the file format.
+Every script prints its usage with `--help`. The [dataset README](dataset/README.md)
+lists the papers and the key flags; section 2 below lists every flag.
 
 ## 1. Set up the environment
 
@@ -85,7 +84,12 @@ With an Anthropic-compatible gateway, use `R2R_AUTH_MODE=custom_headers` with
 setting.
 
 `R2R_RUNS_ROOT` is where run directories go. Put it **outside the checkout** on a large
-disk. When it is unset the scripts use `~/r2r-runs`. `.env` is git-ignored; never commit it.
+disk. When it is unset the scripts use `~/r2r-runs`.
+
+`R2R_MAX_BUDGET_USD` (default `100`) and `R2R_MAX_TURNS` (default `200`) cap every agent
+session: target selection, configuration audit, environment preparation, each repair, and
+the final report. A full run can therefore cost several times the budget.
+`--max-budget-usd` overrides it for one invocation.
 
 Papers whose models are gated on Hugging Face (for example LLaMA2-7B for NSNQuant) need a
 token in the environment before launch: `export HF_TOKEN=<token>`.
@@ -94,13 +98,66 @@ Re-run `scripts/setup.sh` after editing `.env`; it warns about missing provider 
 
 ## 2. Run
 
-The [README](README.md) covers running:
+`--gpu` is the physical GPU index from `rocm-smi`. A run takes from tens of minutes to
+many hours.
 
-- [one paper](README.md#run-one-paper), by dataset id, name, or URLs;
-- [all papers sequentially](README.md#run-all-papers-sequentially), or a subset, on one or more GPUs;
-- [a specific target](README.md#target) with `--target` or `--no-target`;
-- [a porting mode](README.md#porting) with `--porting none|rocm|force`;
-- [resuming an interrupted run](README.md#run-one-paper) with `--recover`.
+### 2.1 One paper
+
+```bash
+scripts/run_one.sh 9 --gpu 0                                  # by id
+scripts/run_one.sh convolutional-diffusion --gpu 0            # by name
+scripts/run_one.sh --paper <paper-url> --repo <repo-url> --gpu 0
+scripts/run_one.sh nsnquant --gpu 1 --detach                  # background
+scripts/run_one.sh --recover "$R2R_RUNS_ROOT/<run-id>" --gpu 0
+```
+
+| Flag | Description |
+| --- | --- |
+| `--gpu N` | Physical AMD GPU index (default `0`). |
+| `--paper URL`, `--repo URL` | Run a paper that is not in the dataset. |
+| `--target TEXT` | Result to reproduce; overrides the dataset target. Name a table, row, or figure, not hyperparameters. |
+| `--no-target` | Ignore the dataset target; the agent picks a central result. |
+| `--porting MODE` | `none`, `rocm` (`--rocm-porting`), or `force` (`--rocm-porting --force-kernel-port`). See [PORTING.md](PORTING.md). |
+| `--max-budget-usd USD` | Spending cap per agent session (default `R2R_MAX_BUDGET_USD`, else `100`). |
+| `--timeout SECONDS` | Limit for the final execution only (default from the dataset, else `14400`). |
+| `--runs-root DIR` | Where runs go (default `R2R_RUNS_ROOT`, else `~/r2r-runs`). |
+| `--run-id ID` | Run directory name (default `<id>-<name>-<UTC timestamp>`). |
+| `--prepare-only` | Build the environment and freeze the manifest, but do not execute. |
+| `--detach` | Run in the background; log at `<runs-root>/<run-id>.log`. |
+| `--dry-run` | Print the `r2r` command and exit. |
+| `--recover DIR` | Resume an interrupted run from its first incomplete stage. Paper, repository, target, and porting mode come from the run. |
+| `-- ARGS` | Pass the remaining arguments to `r2r`, for example `-- --max-execution-repairs 1`. |
+
+### 2.2 All papers, sequentially
+
+```bash
+scripts/run_all.sh --gpu 0 --detach
+tail -f "$R2R_RUNS_ROOT"/batch-*/batch.log
+scripts/run_all.sh --gpu 0 --only 1,2,3,4,5,6,7,8,9,10,11 --detach    # one batch per GPU
+scripts/run_all.sh --gpu 1 --only 12,13,14,15,16,17,18,19,20,21,22 --detach
+```
+
+A failed or blocked paper does not stop the batch.
+
+| Flag | Description |
+| --- | --- |
+| `--gpu N` | GPU for every run (default `0`). |
+| `--only LIST` | Comma-separated ids or names to run, in dataset order. |
+| `--skip LIST` | Comma-separated ids or names to leave out. |
+| `--no-targets` | Ignore every dataset target. |
+| `--max-budget-usd USD` | Spending cap per agent session, for every run. |
+| `--prepare-only` | Freeze each run without executing it. |
+| `--stop-on-error` | Stop at the first run that does not exit `0`. |
+| `--runs-root DIR` | Where runs and the batch directory go. |
+| `--detach` | Run the batch in the background; log at `<batch-dir>/batch.log`. |
+| `--dry-run` | Print each `r2r` command without running it. |
+| `-- ARGS` | Pass the remaining arguments to every `r2r` call. |
+
+### 2.3 Calling `r2r` directly
+
+The scripts wrap `r2r` (also `python -m repo2reproduce`). It adds `--model`,
+`--max-turns`, `--max-execution-repairs`, and `--skip-evidence-validation`; run
+`r2r --help` for all of them.
 
 ## 3. Outputs and where they are
 

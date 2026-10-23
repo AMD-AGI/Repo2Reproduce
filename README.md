@@ -1,83 +1,159 @@
 # Repo2Reproduce
 
-Repo2Reproduce is a multistep agent based on Claude-code SDK that reproduces a paper's result from its official repository: it selects a target, reconciles paper and code settings, builds a Docker environment, runs the experiment deterministically, and compares the metric with the paper.
+Repo2Reproduce is a multistep agent based on Claude-code SDK that reproduces a paper's result from its official repository: it selects a target, reconciles paper and code settings, builds a Docker environment, runs the experiment deterministically, and compares the metric with the paper. It runs on AMD Instinct GPUs and ROCm.
 
-## Documentation
+## How it works
 
-- [BENCHMARK.md](BENCHMARK.md): host setup, `.env`, run outputs, and how to read a verdict.
-- [PORTING.md](PORTING.md): how CUDA kernels are ported to ROCm.
-- [dataset/README.md](dataset/README.md): the 22 benchmark papers.
+Each run goes through these stages, and each stage's output is saved in the run directory:
 
-## Quick start
+1. **Bootstrap.** Download and parse the paper, and clone the official repository.
+2. **Target selection.** Freeze the result to reproduce: the one you name, or a central,
+   locally reproducible result the agent picks.
+3. **Configuration audit.** Reconcile every setting the paper states (dataset, model,
+   seeds, metric) with what the code actually runs.
+4. **Environment preparation.** Build a Docker image, run a short smoke test, and freeze an
+   execution manifest.
+5. **Execution.** Run the manifest deterministically. A failed run gets up to two automatic
+   repairs.
+6. **Report.** Compare the measured value with the paper and give a verdict: `match`,
+   `miss`, `run_incomplete`, or `needs_review`.
+
+## Requirements
+
+- Linux with AMD Instinct GPUs and the ROCm kernel driver (`rocm-smi` lists the GPUs)
+- Docker, usable without `sudo`
+- Python 3.10–3.13, Git, curl, Perl, and Java 11+
+- The Claude Code CLI (`setup.sh --install-claude` installs it)
+- Access to Claude, through the Anthropic API or an Anthropic-compatible gateway
+- Tens of GB of disk per paper, for repositories, caches, and outputs
+
+[BENCHMARK.md](BENCHMARK.md#1-set-up-the-environment) has the install commands.
+
+## Installation
 
 ```bash
-scripts/setup.sh --install-claude    # check the host, install, create .env
-scripts/list_papers.sh               # ids, names, porting modes, targets
-scripts/run_one.sh cogs --gpu 0      # one paper
-scripts/run_all.sh --gpu 0 --detach  # all papers, sequentially
-scripts/summarize.sh                 # status and verdict of every run
+git clone <repo-url> Repo2Reproduce
+cd Repo2Reproduce
+scripts/setup.sh --install-claude --with-tests
 ```
+
+`setup.sh` checks the host, creates `.venv`, installs the package, creates `.env` from
+`.env.example`, and runs the unit tests. It prints how to fix anything missing.
+
+## Configuration
+
+Settings are read from `.env` in the checkout. [`.env.example`](.env.example) lists every
+setting with comments; copy it and fill in your values:
+
+```bash
+cp .env.example .env
+```
+
+| Setting | Description |
+| --- | --- |
+| `R2R_AUTH_MODE` | `api_key` for the Anthropic API, or `custom_headers` for a gateway. `R2R_PROVIDER` is a label. |
+| `ANTHROPIC_API_KEY` | Your key, with `api_key` mode. |
+| `R2R_BASE_URL`, `R2R_AUTH_HEADERS`, `R2R_AUTH_KEY` | Gateway URL, header template, and key, with `custom_headers` mode. |
+| `R2R_MODEL_REASONING` | Model ID for every agent stage. |
+| `R2R_JAVA_HOME` | Java 11+ installation, used to parse papers. |
+| `R2R_RUNS_ROOT` | Where runs are written. Put it outside the checkout on a large disk. |
+| `R2R_MAX_BUDGET_USD` | Spending cap in US dollars per agent session (default `100`). |
+| `R2R_MAX_TURNS` | Turn limit per agent session (default `200`). |
+
+Papers with gated Hugging Face models, such as LLaMA2-7B for NSNQuant, also need
+`export HF_TOKEN=<token>` before launch.
 
 ## Run one paper
 
+Select a paper from the [dataset](dataset/README.md) by id or name. The dataset supplies
+the paper, repository, porting mode, and default target.
+
 ```bash
-scripts/run_one.sh 9 --gpu 0                         # by id
-scripts/run_one.sh convolutional-diffusion --gpu 0   # by name
-scripts/run_one.sh --paper <paper-url> --repo <repo-url> --gpu 0
-scripts/run_one.sh --recover "$R2R_RUNS_ROOT/<run-id>" --gpu 0
+scripts/list_papers.sh                                # ids, names, porting modes, targets
+scripts/run_one.sh 9 --gpu 0                          # by id
+scripts/run_one.sh convolutional-diffusion --gpu 0    # the same paper, by name
+scripts/run_one.sh nsnquant --gpu 1 --detach          # in the background
+```
+
+Any paper with public code works too:
+
+```bash
+scripts/run_one.sh --paper https://arxiv.org/abs/<id> --repo https://github.com/<org>/<repo> --gpu 0
 ```
 
 | Flag | Description |
 | --- | --- |
 | `--gpu N` | Physical AMD GPU index from `rocm-smi` (default `0`). |
 | `--target TEXT` | Result to reproduce; overrides the dataset target. |
-| `--no-target` | Ignore the dataset target; the agent picks a result. |
 | `--porting MODE` | `none`, `rocm`, or `force`; overrides the dataset mode. |
-| `--timeout SECONDS` | Limit for the final execution only (default from the dataset, else `14400`). |
-| `--runs-root DIR` | Where runs go (default `$R2R_RUNS_ROOT`, else `~/r2r-runs`). |
-| `--run-id ID` | Run directory name (default `<id>-<name>-<timestamp>`). |
-| `--prepare-only` | Build and freeze the run, but do not execute it. |
-| `--detach` | Run in the background; log at `<runs-root>/<run-id>.log`. |
-| `--dry-run` | Print the `r2r` command and exit. |
-| `--recover DIR` | Resume an interrupted run from its first incomplete stage. |
-| `-- ARGS` | Pass the remaining arguments to `r2r`. |
+| `--max-budget-usd USD` | Spending cap per agent session; overrides `R2R_MAX_BUDGET_USD`. |
+| `--prepare-only` | Build and freeze the run without executing it. |
+| `--detach` | Run in the background; the log is `<runs-root>/<run-id>.log`. |
 
-## Run all papers sequentially
+## Run all papers
+
+`run_all.sh` runs the papers one after another on one GPU. A failed paper does not stop the
+batch.
 
 ```bash
-scripts/run_all.sh --gpu 0 --detach
-scripts/run_all.sh --gpu 0 --only 5,9,nsnquant
-scripts/run_all.sh --gpu 1 --skip 10,refersplat
+scripts/run_all.sh --gpu 0 --detach                   # all 22 papers
+scripts/run_all.sh --gpu 0 --only 5,9,nsnquant        # a subset
+scripts/run_all.sh --gpu 0 --skip 10,refersplat       # all but these
+```
+
+To use two GPUs, start one batch per GPU on different papers:
+
+```bash
+scripts/run_all.sh --gpu 0 --only 1,2,3,4,5,6,7,8,9,10,11 --detach
+scripts/run_all.sh --gpu 1 --only 12,13,14,15,16,17,18,19,20,21,22 --detach
 ```
 
 | Flag | Description |
 | --- | --- |
-| `--gpu N` | GPU for every run in the batch (default `0`). |
-| `--only LIST` | Comma-separated ids or names to run. |
-| `--skip LIST` | Comma-separated ids or names to leave out. |
-| `--no-targets` | Ignore every dataset target. |
-| `--prepare-only` | Freeze each run without executing it. |
-| `--stop-on-error` | Stop at the first run that does not exit `0`. |
-| `--runs-root DIR`, `--detach`, `--dry-run`, `-- ARGS` | Same as for `run_one.sh`. |
+| `--gpu N` | GPU for every run (default `0`). |
+| `--only LIST`, `--skip LIST` | Comma-separated ids or names to run, or to leave out. |
+| `--no-targets` | Ignore the dataset targets; the agent picks every result. |
+| `--max-budget-usd USD` | Spending cap per agent session, for every run. |
+| `--stop-on-error` | Stop at the first paper that does not succeed. |
+| `--detach` | Run the batch in the background. |
 
-## Target
+## Choose a target
 
-Name a table, row, or figure, not hyperparameters:
+`--target` names the result to reproduce. Name a table, row, or figure; leave out
+hyperparameters, because the configuration audit finds them in the paper and code.
 
 ```bash
 scripts/run_one.sh cogs --gpu 0 --target "Reproduce Table 2, the d=71 modular-addition row."
+scripts/run_one.sh cogs --gpu 0 --no-target           # let the agent choose
 ```
 
-## Porting
+## Port CUDA kernels to ROCm
 
-| `--porting` | Behavior |
+Some papers ship their contribution as a CUDA kernel. `--porting` controls how strictly
+that code must be ported to ROCm:
+
+| Mode | Behavior |
 | --- | --- |
 | `none` | No porting policy. |
-| `rocm` | Port CUDA code with HIPIFY and check numerical parity (`--rocm-porting`). |
-| `force` | The paper's own CUDA kernel must run on ROCm (`--rocm-porting --force-kernel-port`). |
+| `rocm` | Port CUDA code with the official HIPIFY and check numerical parity. |
+| `force` | The paper's own CUDA kernel must run on ROCm, through HIPIFY with fixes or a rewrite. |
 
 ```bash
 scripts/run_one.sh sageattention --gpu 0 --porting force
 ```
 
-Run `r2r --help` for the options of the underlying command.
+See [PORTING.md](PORTING.md) for how porting works and what it achieved.
+
+## Read the results
+
+```bash
+scripts/summarize.sh                                  # every run under the runs root
+scripts/summarize.sh --tsv > results.tsv              # for a spreadsheet
+```
+
+Each run directory has `final_report.md` with the selected result, the paper and
+reproduced values, the verdict, and every assumption and deviation. See
+[BENCHMARK.md](BENCHMARK.md#4-interpret-the-results) for what each status and verdict means.
+
+
+

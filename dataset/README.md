@@ -67,8 +67,39 @@ OpenReview did not return it.
 
 ## Running
 
-See the [README](../README.md#run-one-paper) for how to run one paper, all papers, a target,
-and a porting mode, with every flag.
+Before the first run, copy [`.env.example`](../.env.example) to `.env` and fill in your
+provider key, model, runs root, and budget; the [README](../README.md#configuration)
+explains each setting. Every flag is listed in [BENCHMARK.md](../BENCHMARK.md#2-run).
+
+**One paper**, by id or name:
+
+```bash
+scripts/run_one.sh 9 --gpu 0
+scripts/run_one.sh cogs --gpu 0 --target "Reproduce Table 2, the d=71 modular-addition row."
+scripts/run_one.sh sageattention --gpu 0 --porting force --max-budget-usd 30
+```
+
+| Flag | Description |
+| --- | --- |
+| `--gpu N` | Physical AMD GPU index (default `0`). |
+| `--target TEXT` | Result to reproduce: a table, row, or figure. Overrides the `target` column. |
+| `--porting MODE` | `none`, `rocm`, or `force`. Overrides the `porting` column. See [PORTING.md](../PORTING.md). |
+| `--max-budget-usd USD` | Spending cap per agent session. Overrides `R2R_MAX_BUDGET_USD`. |
+| `--detach` | Run in the background. |
+
+**All papers**, one after another:
+
+```bash
+scripts/run_all.sh --gpu 0 --detach
+scripts/run_all.sh --gpu 0 --only 5,9,nsnquant --max-budget-usd 30
+```
+
+| Flag | Description |
+| --- | --- |
+| `--gpu N` | GPU for every run. |
+| `--only LIST` / `--skip LIST` | Comma-separated ids or names to run or leave out. |
+| `--max-budget-usd USD` | Spending cap per agent session, for every run. |
+| `--detach` | Run the batch in the background. |
 
 ## Adding a paper
 
