@@ -50,6 +50,7 @@ EXECUTION_REPAIR_SKILL = "execution-repair"
 RESULT_COMPARISON_SKILL = "paper-result-comparison"
 ROCM_PORTING_SKILL = "rocm-kernel-porting"
 MATCH_TOLERANCE_PERCENT = 5
+MIN_SESSION_BUDGET_USD = 0.01
 
 
 def load_project_environment() -> None:
@@ -340,6 +341,65 @@ def _agent_env(run_dir: Path, assigned_gpu: str) -> dict[str, str]:
     return env
 
 
+class RunBudgetExceeded(RuntimeError):
+    """The run has spent its whole ``--max-budget-usd``."""
+
+
+def _budget_path(run_dir: Path) -> Path:
+    return run_dir / "budget.json"
+
+
+def _read_budget_ledger(run_dir: Path) -> dict[str, Any]:
+    try:
+        ledger = json.loads(_budget_path(run_dir).read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"spent_usd": 0.0, "sessions": {}}
+    ledger.setdefault("sessions", {})
+    return ledger
+
+
+def spent_budget_usd(run_dir: Path) -> float:
+    """Total agent cost recorded for this run, across stages and recoveries."""
+
+    return float(_read_budget_ledger(run_dir).get("spent_usd", 0.0))
+
+
+def session_budget_usd(
+    run_dir: Path, max_budget_usd: float, resume: str | None = None
+) -> float:
+    """Cap for the next agent session, so the whole run stays within ``max_budget_usd``.
+
+    A resumed session reports its cost cumulatively, so its earlier spend is added back.
+    """
+
+    ledger = _read_budget_ledger(run_dir)
+    spent = float(ledger.get("spent_usd", 0.0))
+    remaining = max_budget_usd - spent
+    if remaining < MIN_SESSION_BUDGET_USD:
+        raise RunBudgetExceeded(
+            f"run budget of ${max_budget_usd:.2f} is spent (${spent:.2f} used); "
+            "recover with a larger --max-budget-usd to continue"
+        )
+    previous = ledger["sessions"].get(resume, {}).get("cost_usd", 0.0) if resume else 0.0
+    return remaining + float(previous)
+
+
+def _record_session_cost(
+    run_dir: Path, stage: str, session_id: str | None, cost_usd: float | None
+) -> None:
+    if not cost_usd:
+        return
+    ledger = _read_budget_ledger(run_dir)
+    sessions = ledger["sessions"]
+    key = session_id or f"unidentified-{len(sessions) + 1}"
+    record = sessions.setdefault(key, {"cost_usd": 0.0, "stages": []})
+    record["cost_usd"] = max(float(record["cost_usd"]), float(cost_usd))
+    record["stages"].append(stage)
+    record["updated_at"] = datetime.now(timezone.utc).isoformat()
+    ledger["spent_usd"] = round(sum(float(s["cost_usd"]) for s in sessions.values()), 6)
+    _atomic_json(_budget_path(run_dir), ledger)
+
+
 async def _invoke_agent(
     *,
     prompt: str,
@@ -347,6 +407,7 @@ async def _invoke_agent(
     log_path: Path,
     stage: str,
     skill_trace: SkillTrace | None = None,
+    run_dir: Path | None = None,
 ) -> tuple[ResultMessage, str | None]:
     result: ResultMessage | None = None
     session_id: str | None = None
@@ -363,6 +424,9 @@ async def _invoke_agent(
     except Exception:
         if result is None:
             raise
+    finally:
+        if run_dir is not None and result is not None:
+            _record_session_cost(run_dir, stage, session_id, result.total_cost_usd)
     if result is None:
         raise RuntimeError(f"{stage} agent returned no ResultMessage")
     return result, session_id
@@ -375,8 +439,11 @@ def _base_options(
     model: str,
     max_turns: int,
     max_budget_usd: float,
+    resume: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    """SDK options for one session; ``max_budget_usd`` is the budget of the whole run."""
+
+    options: dict[str, Any] = {
         "system_prompt": {"type": "preset", "preset": "claude_code"},
         "cwd": str(run_dir / "workspace"),
         "add_dirs": [str(run_dir)],
@@ -384,10 +451,13 @@ def _base_options(
         "strict_mcp_config": True,
         "permission_mode": "dontAsk",
         "max_turns": max_turns,
-        "max_budget_usd": max_budget_usd,
+        "max_budget_usd": session_budget_usd(run_dir, max_budget_usd, resume),
         "model": model,
         "env": _agent_env(run_dir, assigned_gpu),
     }
+    if resume:
+        options["resume"] = resume
+    return options
 
 
 def _run_relative_path(run_dir: Path, value: str | None, fallback: str) -> str:
@@ -537,6 +607,7 @@ async def _request_final_report(
             model=model,
             max_turns=max_turns,
             max_budget_usd=max_budget_usd,
+            resume=session_id,
         )
         options_data.update(
             {
@@ -559,6 +630,7 @@ async def _request_final_report(
             log_path=run_dir / "logs" / "agent_messages.jsonl",
             stage=f"finalize-{attempt}",
             skill_trace=skill_trace,
+            run_dir=run_dir,
         )
         require_skill_available("finalization", skill, skill_trace)
         session_id = observed_session or session_id
@@ -785,7 +857,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout-seconds", type=int, default=14400)
     parser.add_argument("--model")
     parser.add_argument("--max-turns", type=int, default=config.max_turns())
-    parser.add_argument("--max-budget-usd", type=float, default=config.max_budget_usd())
+    parser.add_argument(
+        "--max-budget-usd",
+        type=float,
+        default=config.max_budget_usd(),
+        help="Agent spending cap for the whole run, across stages and recoveries",
+    )
     parser.add_argument(
         "--max-execution-repairs",
         type=int,

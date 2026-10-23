@@ -635,3 +635,29 @@ def test_non_applicable_baseline_can_retain_metric_direction() -> None:
     )
 
     assert report.baseline.metric_direction == "lower_is_better"
+
+
+def test_budget_is_shared_by_every_session_in_a_run(tmp_path: Path) -> None:
+    runner._record_session_cost(tmp_path, "target-1", "a", 20.0)
+    runner._record_session_cost(tmp_path, "audit-1", "b", 15.0)
+
+    assert runner.spent_budget_usd(tmp_path) == 35.0
+    assert runner.session_budget_usd(tmp_path, 50.0) == 15.0
+
+
+def test_resumed_session_cost_is_counted_once(tmp_path: Path) -> None:
+    runner._record_session_cost(tmp_path, "audit-1", "a", 10.0)
+    runner._record_session_cost(tmp_path, "audit-2", "a", 12.0)
+
+    assert runner.spent_budget_usd(tmp_path) == 12.0
+    assert runner.session_budget_usd(tmp_path, 50.0) == 38.0
+    assert runner.session_budget_usd(tmp_path, 50.0, resume="a") == 50.0
+
+
+def test_spent_run_budget_stops_new_sessions(tmp_path: Path) -> None:
+    runner._record_session_cost(tmp_path, "prepare-1", "a", 50.0)
+
+    with pytest.raises(runner.RunBudgetExceeded, match=r"\$50.00"):
+        runner._base_options(
+            tmp_path, assigned_gpu="0", model="test", max_turns=1, max_budget_usd=50.0
+        )

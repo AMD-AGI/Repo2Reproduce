@@ -129,6 +129,7 @@ async def _run_structured_stage(
     """
 
     from .runner import (
+        RunBudgetExceeded,
         SkillTrace,
         SkillUnavailableError,
         _base_options,
@@ -154,13 +155,18 @@ async def _run_structured_stage(
             increment_attempt=True,
             skills=skills,
         )
-        options_data = _base_options(
-            run_dir,
-            assigned_gpu=assigned_gpu,
-            model=model,
-            max_turns=max_turns,
-            max_budget_usd=max_budget_usd,
-        )
+        try:
+            options_data = _base_options(
+                run_dir,
+                assigned_gpu=assigned_gpu,
+                model=model,
+                max_turns=max_turns,
+                max_budget_usd=max_budget_usd,
+                resume=session_id,
+            )
+        except RunBudgetExceeded as exc:
+            _update_stage(run_dir, stage, "failed", session_id=session_id, error=str(exc))
+            raise
         options_data.update(
             {
                 "allowed_tools": tools,
@@ -179,6 +185,7 @@ async def _run_structured_stage(
             log_path=log_path,
             stage=f"{stage}-{attempt}",
             skill_trace=skill_trace,
+            run_dir=run_dir,
         )
         try:
             for skill in skills:

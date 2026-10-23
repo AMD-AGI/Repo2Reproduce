@@ -8,7 +8,7 @@
 #   --runs-root DIR    where run directories go (default: $R2R_RUNS_ROOT, .env, ~/r2r-runs)
 #   --only LIST        comma-separated ids or names to run, in dataset order (e.g. 5,9,nsnquant)
 #   --skip LIST        comma-separated ids or names to leave out
-#   --max-budget-usd USD  spending cap per agent session, for every run (default: R2R_MAX_BUDGET_USD, else 100)
+#   --max-budget-usd USD  spending cap for each paper's run (default: R2R_MAX_BUDGET_USD, else 100)
 #   --prepare-only     stop each run after its execution manifest is frozen
 #   --stop-on-error    stop the batch at the first run that does not exit 0
 #   --dry-run          print each r2r command without running it

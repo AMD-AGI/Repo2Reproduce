@@ -86,10 +86,12 @@ setting.
 `R2R_RUNS_ROOT` is where run directories go. Put it **outside the checkout** on a large
 disk. When it is unset the scripts use `~/r2r-runs`.
 
-`R2R_MAX_BUDGET_USD` (default `100`) and `R2R_MAX_TURNS` (default `200`) cap every agent
-session: target selection, configuration audit, environment preparation, each repair, and
-the final report. A full run can therefore cost several times the budget.
-`--max-budget-usd` overrides it for one invocation.
+`R2R_MAX_BUDGET_USD` (default `100`) caps the agent cost of a whole run: target selection,
+configuration audit, environment preparation, each repair, the final report, and any
+recovery together. Each session gets only what is left, the run stops with status
+`failed` once the budget is spent, and `budget.json` records each session's cost.
+`--max-budget-usd` overrides it for one invocation; on `--recover` it is the new total.
+`R2R_MAX_TURNS` (default `200`) limits each agent session.
 
 Papers whose models are gated on Hugging Face (for example LLaMA2-7B for NSNQuant) need a
 token in the environment before launch: `export HF_TOKEN=<token>`.
@@ -117,7 +119,7 @@ scripts/run_one.sh --recover "$R2R_RUNS_ROOT/<run-id>" --gpu 0
 | `--paper URL`, `--repo URL` | Run a paper that is not in the dataset. |
 | `--target TEXT` | Result to reproduce: a table, row, or figure, not hyperparameters. Without it, the agent picks a central result. |
 | `--porting MODE` | `none` (default), `rocm` (`--rocm-porting`), or `force` (`--rocm-porting --force-kernel-port`). See [PORTING.md](PORTING.md). |
-| `--max-budget-usd USD` | Spending cap per agent session (default `R2R_MAX_BUDGET_USD`, else `100`). |
+| `--max-budget-usd USD` | Spending cap for the whole run, across all stages (default `R2R_MAX_BUDGET_USD`, else `100`). |
 | `--timeout SECONDS` | Limit for the final execution only (default `14400`). |
 | `--runs-root DIR` | Where runs go (default `R2R_RUNS_ROOT`, else `~/r2r-runs`). |
 | `--run-id ID` | Run directory name (default `<id>-<name>-<UTC timestamp>`). |
@@ -143,7 +145,7 @@ A failed or blocked paper does not stop the batch.
 | `--gpu N` | GPU for every run (default `0`). |
 | `--only LIST` | Comma-separated ids or names to run, in dataset order. |
 | `--skip LIST` | Comma-separated ids or names to leave out. |
-| `--max-budget-usd USD` | Spending cap per agent session, for every run. |
+| `--max-budget-usd USD` | Spending cap for each paper's run. |
 | `--prepare-only` | Freeze each run without executing it. |
 | `--stop-on-error` | Stop at the first run that does not exit `0`. |
 | `--runs-root DIR` | Where runs and the batch directory go. |

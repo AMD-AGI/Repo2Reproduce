@@ -57,7 +57,7 @@ cp .env.example .env
 | `R2R_MODEL_REASONING` | Model ID for every agent stage. |
 | `R2R_JAVA_HOME` | Java 11+ installation, used to parse papers. |
 | `R2R_RUNS_ROOT` | Where runs are written. Put it outside the checkout on a large disk. |
-| `R2R_MAX_BUDGET_USD` | Spending cap in US dollars per agent session (default `100`). |
+| `R2R_MAX_BUDGET_USD` | Spending cap in US dollars for a whole run, across all stages (default `100`). |
 | `R2R_MAX_TURNS` | Turn limit per agent session (default `200`). |
 
 Papers with gated Hugging Face models, such as LLaMA2-7B for NSNQuant, also need
@@ -86,7 +86,7 @@ scripts/run_one.sh --paper https://arxiv.org/abs/<id> --repo https://github.com/
 | `--gpu N` | Physical AMD GPU index from `rocm-smi` (default `0`). |
 | `--target TEXT` | Result to reproduce (default: the agent chooses). |
 | `--porting MODE` | `none` (default), `rocm`, or `force`. |
-| `--max-budget-usd USD` | Spending cap per agent session; overrides `R2R_MAX_BUDGET_USD`. |
+| `--max-budget-usd USD` | Spending cap for the whole run; overrides `R2R_MAX_BUDGET_USD`. |
 | `--prepare-only` | Build and freeze the run without executing it. |
 | `--detach` | Run in the background; the log is `<runs-root>/<run-id>.log`. |
 
@@ -112,7 +112,7 @@ scripts/run_all.sh --gpu 1 --only 12,13,14,15,16,17,18,19,20,21,22 --detach
 | --- | --- |
 | `--gpu N` | GPU for every run (default `0`). |
 | `--only LIST`, `--skip LIST` | Comma-separated ids or names to run, or to leave out. |
-| `--max-budget-usd USD` | Spending cap per agent session, for every run. |
+| `--max-budget-usd USD` | Spending cap for each paper's run. |
 | `--stop-on-error` | Stop at the first paper that does not succeed. |
 | `--detach` | Run the batch in the background. |
 
@@ -141,6 +141,21 @@ scripts/run_one.sh sageattention --gpu 0 --porting force
 ```
 
 See [PORTING.md](PORTING.md) for how porting works and what it achieved.
+
+## Set a budget
+
+`R2R_MAX_BUDGET_USD` in `.env`, or `--max-budget-usd` on the command line, caps the agent
+cost of a whole run: target selection, audit, preparation, repairs, the final report, and
+any recovery together. Each agent session gets only what the run has left, and the run
+stops with status `failed` once the budget is spent. `budget.json` in the run directory
+records the cost of each session.
+
+```bash
+scripts/run_one.sh cogs --gpu 0 --max-budget-usd 30
+scripts/run_one.sh --recover "$R2R_RUNS_ROOT/<run-id>" --gpu 0 --max-budget-usd 45
+```
+
+When recovering, the budget is the new total for the run, including what it already spent.
 
 ## Read the results
 

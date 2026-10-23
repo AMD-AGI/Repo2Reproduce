@@ -12,7 +12,7 @@
 #   --run-id ID         run directory name (default: <id>-<name>-<UTC timestamp>)
 #   --timeout SECONDS   limit for the final execution (default: 14400)
 #   --porting MODE      none | rocm | force (default: none)
-#   --max-budget-usd USD  spending cap per agent session (default: R2R_MAX_BUDGET_USD in .env, else 100)
+#   --max-budget-usd USD  spending cap for the whole run (default: R2R_MAX_BUDGET_USD in .env, else 100)
 #   --prepare-only      stop after the execution manifest is frozen; do not execute
 #   --detach            run in the background; console output goes to <runs-root>/<run-id>.log
 #   --dry-run           print the r2r command without running it
