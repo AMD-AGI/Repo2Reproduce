@@ -1,19 +1,33 @@
 # Repo2Reproduce
 
-Repo2Reproduce is a multistep agent based on Claude-code SDK that reproduces a paper's result from its official repository: it selects a target, reconciles paper and code settings, builds a Docker environment, runs the experiment deterministically, and compares the metric with the paper. It runs on AMD Instinct GPUs and ROCm.
+Repo2Reproduce is a multistep agent that reproduces a paper's result from its official repository: it selects a target experiment, reconciles paper and code settings, builds a Docker environment, runs the experiment deterministically, and compares the metric with the paper. It runs on AMD Instinct GPUs and ROCm.
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-![Repo2Reproduce agentic architecture](assets/repo2reproduce_agentic_architecture.png)
+## Project evolution
+
+**Repo2ROCm (v1)** — Our earlier system for reproducing CUDA-centric research
+repositories on AMD ROCm GPUs.
+
+🏆 Accepted to the **EMNLP 2026 Industry Track**<br>
+📄 [Paper: Repo2ROCm — An Agentic System for Reproducing Research Code on AMD ROCm GPUs](https://gauravsarkarr.github.io/repo2rocm/paper.pdf)<br>
+💻 [Code: Gaurav7888/Repo2ROCm](https://github.com/Gaurav7888/Repo2ROCm)
+
+**Repo2Reproduce (v2)** — The current system extends the scope from
+cross-platform repository migration to skill-guided reproduction of a
+specific result reported in a research paper.
+
+📄 [Technical report: Repo2Reproduce — Skill-Guided Reproduction of Research Results on AMD ROCm](paper/arXiv_Repo2Reproduce.pdf)
 
 ## Architecture
 
-A run takes two inputs, a paper URL and its official repository URL. The paper is parsed
-with OpenDataLoader PDF, and the repository is cloned and pinned to a commit.
+![Repo2Reproduce agentic architecture](assets/repo2reproduce_agentic_architecture.png)
+
+A run begins with two inputs: a research paper URL and the URL of its official code repository. The paper is parsed with OpenDataLoader PDF, while the repository is cloned and pinned to a specific commit. The Orchestrator then receives these inputs and invokes the appropriate agents to carry out the reproduction attempt.
 
 ### Orchestrator
 
-The **Repo2Reproduce Orchestrator** is ordinary Python code, not an agent. 
+The **Repo2Reproduce Orchestrator** is a deterministic python code controls the flow of the agent. 
 
 ### Stages
 
